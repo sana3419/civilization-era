@@ -16,6 +16,7 @@ func _init() -> void:
 	_bench_determinism()
 	_bench_tick()
 	_bench_buffer()
+	_bench_flow_field()
 
 	print("=== done ===")
 	quit()
@@ -85,3 +86,29 @@ func _bench_buffer() -> void:
 	var ms := (Time.get_ticks_usec() - t0) / 1000.0 / 300.0
 	var buf := w.get_render_buffer()
 	print("write_render_buffer %d units: %.3f ms (%d floats)" % [N, ms, buf.size()])
+
+
+func _bench_flow_field() -> void:
+	var ff := FlowField.new()
+	ff.setup(512, 32.0, 99, 0.1) # 512×512 格，10% 不可通行
+
+	var t0 := Time.get_ticks_usec()
+	for i in 10:
+		ff.generate(256, 256)
+	var gen_ms := (Time.get_ticks_usec() - t0) / 1000.0 / 10.0
+	print("flow field generate 512x512: %.2f ms" % gen_ms)
+
+	var dir: Vector2 = ff.sample(Vector2(1000.0, 1000.0))
+	print("flow sample sanity: dir(1000,1000) = %s (len %.2f)" % [dir, dir.length()])
+
+	for count in [1000, 10000]:
+		var w := SimWorld.new()
+		w.setup(count, 16384.0, 7, 6)
+		w.set_flow_field(ff)
+		for i in 20:
+			w.tick(0.1)
+		t0 = Time.get_ticks_usec()
+		for i in 300:
+			w.tick(0.1)
+		var ms := (Time.get_ticks_usec() - t0) / 1000.0 / 300.0
+		print("flow-follow tick %d units: %.3f ms/tick" % [count, ms])

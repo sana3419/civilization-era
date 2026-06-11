@@ -85,6 +85,18 @@ void SimWorld::setup(int p_count, float p_world_size, int p_seed, int p_threads)
 }
 
 void SimWorld::move_range(int p_begin, int p_end, float p_dt) {
+    if (flow_field.is_valid()) {
+        const FlowField *ff = flow_field.ptr();
+        for (int i = p_begin; i < p_end; i++) {
+            float dx, dy;
+            ff->sample_raw(pos_x[i], pos_y[i], dx, dy);
+            vel_x[i] = dx * UNIT_SPEED;
+            vel_y[i] = dy * UNIT_SPEED;
+            pos_x[i] += vel_x[i] * p_dt;
+            pos_y[i] += vel_y[i] * p_dt;
+        }
+        return;
+    }
     const float center = world_size * 0.5f;
     const float half = world_size * 0.125f;
     for (int i = p_begin; i < p_end; i++) {
@@ -229,6 +241,7 @@ int64_t SimWorld::state_hash() const {
 
 void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("setup", "count", "world_size", "seed", "threads"), &SimWorld::setup);
+    ClassDB::bind_method(D_METHOD("set_flow_field", "field"), &SimWorld::set_flow_field);
     ClassDB::bind_method(D_METHOD("tick", "dt"), &SimWorld::tick);
     ClassDB::bind_method(D_METHOD("write_render_buffer"), &SimWorld::write_render_buffer);
     ClassDB::bind_method(D_METHOD("get_render_buffer"), &SimWorld::get_render_buffer);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "flow_field.h"
+
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 
@@ -37,6 +39,7 @@ class SimWorld : public godot::RefCounted {
     std::vector<uint32_t> cell_entries;
 
     godot::PackedFloat32Array render_buffer;
+    godot::Ref<FlowField> flow_field; // 有效时移动阶段走流场，否则走随机路径点
 
     void move_range(int p_begin, int p_end, float p_dt);
     void separate_range(int p_begin, int p_end);
@@ -44,6 +47,7 @@ class SimWorld : public godot::RefCounted {
 
 public:
     void setup(int p_count, float p_world_size, int p_seed, int p_threads);
+    void set_flow_field(const godot::Ref<FlowField> &p_field) { flow_field = p_field; }
     void tick(float p_dt);
     void write_render_buffer();
     godot::PackedFloat32Array get_render_buffer() const { return render_buffer; }
