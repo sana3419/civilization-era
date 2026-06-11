@@ -9,6 +9,13 @@
 namespace cive {
 
 // 地形 ID（渲染端 TileSet 槽位与此对应）
+enum ResourceType : uint8_t {
+    RES_WOOD = 0,
+    RES_STONE = 1,
+    RES_FOOD = 2,
+    RES_COUNT = 3,
+};
+
 enum Terrain : uint8_t {
     T_DEEP_WATER = 0,
     T_WATER = 1,
@@ -30,6 +37,7 @@ class GameMap : public godot::RefCounted {
     int dim = 0;
     uint32_t seed = 0;
     std::vector<uint8_t> terrain;
+    std::vector<uint16_t> resource_amount; // 每格剩余资源量
 
 public:
     void generate(int p_dim, int p_seed);
@@ -45,11 +53,18 @@ public:
     godot::PackedByteArray save_state() const;
     bool load_state(const godot::PackedByteArray &p_data);
 
+    int get_resource_amount(int p_cx, int p_cy) const;
+
     // C++ 热路径
     inline uint8_t terrain_at(int p_cx, int p_cy) const {
         return terrain[size_t(p_cy) * dim + p_cx];
     }
+    inline uint16_t resource_at(size_t p_cell) const { return resource_amount[p_cell]; }
+    // 从格子取走至多 p_amount，返回实际取得
+    int take_resource(size_t p_cell, int p_amount);
     static int terrain_move_cost(uint8_t p_t);
+    // 地形产出的资源类型（RES_*），-1 = 无
+    static int terrain_resource(uint8_t p_t);
 
 protected:
     static void _bind_methods();

@@ -1,5 +1,7 @@
 #include "flow_field.h"
 
+#include "game_map.h"
+
 #include <godot_cpp/core/class_db.hpp>
 
 #include <algorithm>
@@ -34,6 +36,22 @@ void FlowField::setup(int p_dim, float p_cell_size, int p_seed, float p_blocked_
             terrain_cost[i] = 255; // 不可通行（山地/水域）
         } else {
             terrain_cost[i] = 1 + (r >> 8) % 3; // 1..3：平原/森林/丘陵
+        }
+    }
+}
+
+void FlowField::setup_from_map(const GameMap *p_map, float p_cell_size) {
+    dim = p_map->get_dim();
+    cell_size = p_cell_size;
+    const size_t n = size_t(dim) * dim;
+    terrain_cost.resize(n);
+    integration.resize(n);
+    dir_x.assign(n, 0.0f);
+    dir_y.assign(n, 0.0f);
+    for (int cy = 0; cy < dim; cy++) {
+        for (int cx = 0; cx < dim; cx++) {
+            const int mc = GameMap::terrain_move_cost(p_map->terrain_at(cx, cy));
+            terrain_cost[size_t(cy) * dim + cx] = (mc == 0) ? 255 : uint8_t(mc / 10 + (mc % 10 != 0));
         }
     }
 }

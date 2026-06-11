@@ -30,6 +30,50 @@ int GameMap::terrain_move_cost(uint8_t p_t) {
     }
 }
 
+// 地形 → 资源类型
+int GameMap::terrain_resource(uint8_t p_t) {
+    switch (p_t) {
+        case T_FOREST:
+        case T_DENSE_FOREST:
+            return RES_WOOD;
+        case T_HILLS:
+            return RES_STONE;
+        case T_PLAINS:
+            return RES_FOOD;
+        default:
+            return -1;
+    }
+}
+
+static uint16_t terrain_resource_init(uint8_t p_t) {
+    switch (p_t) {
+        case T_FOREST:
+            return 150;
+        case T_DENSE_FOREST:
+            return 250;
+        case T_HILLS:
+            return 200;
+        case T_PLAINS:
+            return 100;
+        default:
+            return 0;
+    }
+}
+
+int GameMap::get_resource_amount(int p_cx, int p_cy) const {
+    if (p_cx < 0 || p_cx >= dim || p_cy < 0 || p_cy >= dim) {
+        return 0;
+    }
+    return resource_amount[size_t(p_cy) * dim + p_cx];
+}
+
+int GameMap::take_resource(size_t p_cell, int p_amount) {
+    const int avail = resource_amount[p_cell];
+    const int taken = std::min(avail, p_amount);
+    resource_amount[p_cell] = uint16_t(avail - taken);
+    return taken;
+}
+
 void GameMap::generate(int p_dim, int p_seed) {
     dim = p_dim;
     seed = uint32_t(p_seed);
@@ -73,6 +117,10 @@ void GameMap::generate(int p_dim, int p_seed) {
             terrain[size_t(cy) * dim + cx] = ter;
         }
     }
+    resource_amount.resize(terrain.size());
+    for (size_t i = 0; i < terrain.size(); i++) {
+        resource_amount[i] = terrain_resource_init(terrain[i]);
+    }
 }
 
 int GameMap::get_terrain(int p_cx, int p_cy) const {
@@ -104,15 +152,17 @@ int GameMap::move_cost(int p_cx, int p_cy) const {
 }
 
 static constexpr uint32_t MAP_MAGIC = 0x4D564943; // "CIVM" LE
-static constexpr uint32_t MAP_VERSION = 1;
+static constexpr uint32_t MAP_VERSION = 2; // v2: + resource_amount
 
 PackedByteArray GameMap::save_state() const {
+    const size_t n = terrain.size();
     PackedByteArray out;
-    out.resize(4 * 4 + terrain.size());
+    out.resize(4 * 4 + n + n * 2);
     uint8_t *w = out.ptrw();
     uint32_t header[4] = { MAP_MAGIC, MAP_VERSION, uint32_t(dim), seed };
     std::memcpy(w, header, sizeof(header));
-    std::memcpy(w + sizeof(header), terrain.data(), terrain.size());
+    std::memcpy(w + 16, terrain.data(), n);
+    std::memcpy(w + 16 + n, resource_amount.data(), n * 2);
     return out;
 }
 
@@ -126,13 +176,16 @@ bool GameMap::load_state(const PackedByteArray &p_data) {
         return false;
     }
     const int d = int(header[2]);
-    if (size_t(p_data.size()) != 16 + size_t(d) * d) {
+    const size_t n = size_t(d) * d;
+    if (size_t(p_data.size()) != 16 + n + n * 2) {
         return false;
     }
     dim = d;
     seed = header[3];
-    terrain.resize(size_t(dim) * dim);
-    std::memcpy(terrain.data(), p_data.ptr() + 16, terrain.size());
+    terrain.resize(n);
+    resource_amount.resize(n);
+    std::memcpy(terrain.data(), p_data.ptr() + 16, n);
+    std::memcpy(resource_amount.data(), p_data.ptr() + 16 + n, n * 2);
     return true;
 }
 
@@ -142,6 +195,7 @@ void GameMap::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_terrain", "cx", "cy"), &GameMap::get_terrain);
     ClassDB::bind_method(D_METHOD("get_terrain_buffer"), &GameMap::get_terrain_buffer);
     ClassDB::bind_method(D_METHOD("is_passable", "cx", "cy"), &GameMap::is_passable);
+    ClassDB::bind_method(D_METHOD("get_resource_amount", "cx", "cy"), &GameMap::get_resource_amount);
     ClassDB::bind_method(D_METHOD("move_cost", "cx", "cy"), &GameMap::move_cost);
     ClassDB::bind_method(D_METHOD("save_state"), &GameMap::save_state);
     ClassDB::bind_method(D_METHOD("load_state", "data"), &GameMap::load_state);

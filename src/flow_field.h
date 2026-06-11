@@ -21,6 +21,7 @@ class FlowField : public godot::RefCounted {
 
 public:
     void setup(int p_dim, float p_cell_size, int p_seed, float p_blocked_ratio);
+    void setup_from_map(const class GameMap *p_map, float p_cell_size);
     void generate(int p_target_cx, int p_target_cy);
     godot::Vector2 sample(godot::Vector2 p_world_pos) const;
     int get_dim() const { return dim; }

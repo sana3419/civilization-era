@@ -23,6 +23,7 @@ func _init() -> void:
 	_bench_map()
 	_bench_astar()
 	_bench_saveload()
+	_bench_gather()
 	_bench_golden()
 
 	print("=== done, failures: %d ===" % failures)
@@ -193,6 +194,48 @@ func _bench_saveload() -> void:
 		_check(loaded, "load"),
 		_check(w1.state_hash() == w2.state_hash(), "resume"),
 		data.size(),
+	])
+
+
+func _run_gather_sim() -> SimWorld:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	# 找一片森林和附近的可通行存储点
+	var fc := Vector2i(-1, -1)
+	for cy in range(100, 412):
+		for cx in range(100, 412):
+			if map.get_terrain(cx, cy) == 4: # T_FOREST
+				fc = Vector2i(cx, cy)
+				break
+		if fc.x >= 0:
+			break
+	var drop := fc
+	for dx in range(4, 16):
+		if map.is_passable(fc.x + dx, fc.y):
+			drop = Vector2i(fc.x + dx, fc.y)
+			break
+
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	w.spawn_workers(20, Vector2(fc) * 32.0 + Vector2(16, 16))
+	w.set_dropoff(Vector2(drop) * 32.0 + Vector2(16, 16))
+	var ids := PackedInt32Array(range(20))
+	w.command_gather(ids, Vector2(fc) * 32.0 + Vector2(16, 16))
+	for i in 1200: # 120 秒模拟
+		w.tick(0.1)
+	return w
+
+
+func _bench_gather() -> void:
+	var t0 := Time.get_ticks_usec()
+	var w1 := _run_gather_sim()
+	var ms := (Time.get_ticks_usec() - t0) / 1000.0
+	var w2 := _run_gather_sim()
+	var wood := w1.get_stockpile(0)
+	print("gather: 20 workers, 1200 ticks → wood %d %s | determinism %s | %.0f ms total" % [
+		wood, _check(wood > 0, "gather yield"),
+		_check(w1.state_hash() == w2.state_hash(), "gather determinism"), ms,
 	])
 
 
