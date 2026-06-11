@@ -197,6 +197,7 @@ void GameMap::_bind_methods() {
     ClassDB::bind_method(D_METHOD("is_passable", "cx", "cy"), &GameMap::is_passable);
     ClassDB::bind_method(D_METHOD("get_resource_amount", "cx", "cy"), &GameMap::get_resource_amount);
     ClassDB::bind_method(D_METHOD("move_cost", "cx", "cy"), &GameMap::move_cost);
+    ClassDB::bind_static_method("GameMap", D_METHOD("terrain_resource", "terrain"), &GameMap::terrain_resource);
     ClassDB::bind_method(D_METHOD("save_state"), &GameMap::save_state);
     ClassDB::bind_method(D_METHOD("load_state", "data"), &GameMap::load_state);
 }

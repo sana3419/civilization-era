@@ -36,6 +36,7 @@ const BUILDINGS := [
 const WALL_TYPES := [10, 13] # 可拖动划线连放的 1×1 墙体
 # 训练表：单位类型 → 所需建筑/成本（与 src/sim_world.h 对应）
 const TRAIN := [
+	{ "type": 0, "name": "工人", "building": 0, "wood": 0, "food": 20 },
 	{ "type": 1, "name": "民兵", "building": 6, "wood": 10, "food": 20 },
 	{ "type": 3, "name": "弓手", "building": 7, "wood": 15, "food": 15 },
 	{ "type": 4, "name": "骑兵", "building": 8, "wood": 30, "food": 30 },
@@ -44,6 +45,12 @@ const TRAIN := [
 	{ "type": 7, "name": "投石车", "building": 12, "wood": 80, "stone": 20, "food": 10 },
 ]
 const UNIT_MAX_HP := [100.0, 60.0, 60.0, 50.0, 80.0, 100.0, 300.0, 200.0] # 与 src/sim_world.h STATS 对应
+const UNIT_NAMES := ["工人", "民兵", "土匪", "弓手", "骑兵", "长枪兵", "攻城槌", "投石车"]
+const STATE_NAMES := ["游荡", "待命", "行军", "采集", "运回", "作战", "溃逃", "驻墙"]
+const TERRAIN_NAMES := ["深水", "浅水", "平原", "草地", "森林", "密林", "丘陵", "高山", "沙漠", "沼泽", "雪原"]
+const RES_NAMES := ["木材", "石料", "食物"]
+const POP_BASE := 10 # 人口上限：基础 + 每座房屋 +5（同步 DESIGN.md）
+const POP_PER_HOUSE := 5
 const RAID_INTERVAL := 90.0 # 土匪袭扰间隔（模拟秒）
 const FORMATION_NAMES := ["无阵型", "横线阵", "纵队", "方阵", "锥形阵", "盾墙", "圆阵", "散兵线", "新月阵"]
 
@@ -67,6 +74,8 @@ var bandit_pos := Vector2.ZERO
 var attack_fx := [] # [{from, to, ttl}]
 var raid_timer := RAID_INTERVAL
 var raid_count := 0
+var notice := "" # 短消息（来袭/资源不足…），带 TTL 否则会被每帧状态行覆盖
+var notice_ttl := 0.0
 var ghost := ColorRect.new()
 var shot_timer := 0.0
 
@@ -321,7 +330,58 @@ func _build_hud() -> void:
 	layer.add_child(bar)
 
 
+func _notice(text: String, ttl := 3.0) -> void:
+	notice = text
+	notice_ttl = ttl
+
+
+func _pop_cap() -> int:
+	var flat := sim.get_buildings()
+	var cap := POP_BASE
+	for b in range(flat.size() / 2):
+		if flat[b * 2] == 4 and sim.get_building_hp(b) > 0.0: # 房屋
+			cap += POP_PER_HOUSE
+	return cap
+
+
+# 底部状态行：通知 | 选中详情 | 悬停地块 | 全局态势
+func _status_line() -> String:
+	var parts := PackedStringArray()
+	if notice_ttl > 0.0:
+		parts.append(notice)
+	if selected.size() == 1 and sim.is_unit_alive(selected[0]):
+		var id := selected[0]
+		var t := sim.get_unit_type(id)
+		parts.append("%s HP %d/%d  士气 %d  %s" % [
+			UNIT_NAMES[t], int(sim.get_unit_hp(id)), int(UNIT_MAX_HP[t]),
+			int(sim.get_unit_morale(id)), STATE_NAMES[sim.get_unit_state(id)],
+		])
+	elif selected.size() > 1:
+		var counts := {}
+		for id in selected:
+			var t := sim.get_unit_type(id)
+			counts[t] = counts.get(t, 0) + 1
+		var bits := PackedStringArray()
+		for t in counts:
+			bits.append("%s×%d" % [UNIT_NAMES[t], counts[t]])
+		parts.append("已选 " + " ".join(bits))
+	var hc := Vector2i(get_global_mouse_position() / TILE)
+	if hc.x >= 0 and hc.x < MAP_DIM and hc.y >= 0 and hc.y < MAP_DIM:
+		var tname: String = TERRAIN_NAMES[map.get_terrain(hc.x, hc.y)]
+		var res := GameMap.terrain_resource(map.get_terrain(hc.x, hc.y))
+		if res >= 0:
+			tname += "·%s %d" % [RES_NAMES[res], map.get_resource_amount(hc.x, hc.y)]
+		parts.append(tname)
+	parts.append("兵力 %d  敌 %d  FPS %d" % [
+		sim.count_alive(0), sim.count_alive(1), Engine.get_frames_per_second(),
+	])
+	return "  |  ".join(parts)
+
+
 func _train_unit(t: Dictionary) -> void:
+	if sim.count_alive(0) >= _pop_cap():
+		_notice("人口已满，先造房屋（+%d/座）" % POP_PER_HOUSE)
+		return
 	var flat := sim.get_buildings()
 	for b in range(flat.size() / 2):
 		if flat[b * 2] == t["building"] and sim.get_building_hp(b) > 0.0:
@@ -331,9 +391,9 @@ func _train_unit(t: Dictionary) -> void:
 				sim.spawn_units(t["type"], 1, pos, 0)
 				_sync_unit_mesh()
 			else:
-				info_label.text = "资源不足"
+				_notice("资源不足")
 			return
-	info_label.text = "需要先建%s" % BUILDINGS[t["building"]]["name"]
+	_notice("需要先建%s" % BUILDINGS[t["building"]]["name"])
 
 
 func _build_minimap() -> void:
@@ -426,7 +486,7 @@ func _process(delta: float) -> void:
 				n = 4
 			sim.command_move(PackedInt32Array(range(first, first + n)), camp_pos)
 			_sync_unit_mesh()
-			info_label.text = "⚔ 土匪来袭！" if n == 3 else "⚔ 土匪来袭——带着攻城槌！"
+			_notice("⚔ 土匪来袭！" if n == 3 else "⚔ 土匪来袭——带着攻城槌！", 5.0)
 
 	sim.write_render_buffer(sim_accum / step) # 插值系数
 	if unit_mm.instance_count > 0:
@@ -451,13 +511,12 @@ func _process(delta: float) -> void:
 		var ok := sim.can_place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1))
 		ghost.color = Color(0.2, 1.0, 0.2, 0.45) if ok else Color(1.0, 0.2, 0.2, 0.45)
 
-	res_label.text = "木材 %d  石料 %d  食物 %d" % [
+	notice_ttl -= delta
+	res_label.text = "木材 %d  石料 %d  食物 %d  人口 %d/%d" % [
 		sim.get_stockpile(0), sim.get_stockpile(1), sim.get_stockpile(2),
+		sim.count_alive(0), _pop_cap(),
 	]
-	info_label.text = "已选 %d  兵力 %d  敌人 %d   FPS %d" % [
-		selected.size(), sim.count_alive(0), sim.count_alive(1),
-		Engine.get_frames_per_second(),
-	]
+	info_label.text = _status_line()
 	queue_redraw()
 	minimap.queue_redraw()
 
@@ -592,7 +651,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		for p in pts:
 			c += p
 		sim.command_move(selected, c / pts.size())
-		info_label.text = "阵型：" + FORMATION_NAMES[f]
+		_notice("阵型：" + FORMATION_NAMES[f])
 	elif key.keycode == KEY_S and key.ctrl_pressed:
 		_save_game()
 	elif key.keycode == KEY_F9:
@@ -609,7 +668,7 @@ func _save_game() -> void:
 	f.store_buffer(map_data)
 	f.store_32(sim_data.size())
 	f.store_buffer(sim_data)
-	info_label.text = "已存档"
+	_notice("已存档")
 
 
 func _load_game() -> void:
@@ -619,10 +678,10 @@ func _load_game() -> void:
 	var map_data := f.get_buffer(f.get_32())
 	var sim_data := f.get_buffer(f.get_32())
 	if not map.load_state(map_data) or not sim.load_state(sim_data):
-		info_label.text = "读档失败"
+		_notice("读档失败")
 		return
 	# sim 持有的 map 引用不变，load_state 已重建占地位图与流场缓存
 	selected = PackedInt32Array()
 	_sync_unit_mesh()
 	_rebuild_building_visuals()
-	info_label.text = "已读档"
+	_notice("已读档")

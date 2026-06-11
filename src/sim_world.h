@@ -140,7 +140,7 @@ class SimWorld : public godot::RefCounted {
     // 运行时（不序列化）
     std::vector<float> new_x, new_y;
     std::vector<float> prev_x, prev_y; // 渲染插值
-    std::vector<uint8_t> occupied; // 建筑占地位图（由 b_* 重建）
+    std::vector<int32_t> occupied; // 建筑占地：0 = 空，否则建筑 index+1（由 b_* 重建）
     std::vector<int32_t> b_garrison; // 各建筑驻军单位 id，-1 = 空（由单位状态重建）
     std::vector<const FlowField *> unit_field; // 本 tick 各单位用的流场
     godot::Ref<GameMap> map;
@@ -164,6 +164,9 @@ class SimWorld : public godot::RefCounted {
     void separate_range(int p_begin, int p_end);
     void build_grid();
     int32_t cell_of_pos(float p_x, float p_y) const;
+    // 真地形碰撞：不可通行地形/建筑占地 = 实体（开门放行己方）。
+    // worker 线程只读共享状态，可并行调用。
+    bool cell_blocked_for(int p_cx, int p_cy, uint8_t p_faction) const;
     int32_t find_nearest_resource(int32_t p_from_cell, int p_res_type) const;
     bool cell_adjacent(int32_t p_a, int32_t p_b) const;
     int32_t nearest_dropoff(int p_res_type, int32_t p_from_cell) const;

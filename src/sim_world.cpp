@@ -789,19 +789,17 @@ void SimWorld::logic_pass(float p_dt) {
                 break;
 
             case U_MOVING: {
-                const float sdx = slot_x[i] - pos_x[i];
-                const float sdy = slot_y[i] - pos_y[i];
-                if (sdx * sdx + sdy * sdy < 100.0f) { // 到达阵型槽位
-                    state[i] = U_IDLE;
-                    if (target_cell[i] <= -2) { // 登墙指令：到位后尝试占驻
-                        const int b = -2 - target_cell[i];
-                        bool claimed = false;
-                        if (b < int(b_cell.size()) && b_hp[b] > 0.0f &&
-                                b_type[b] == B_STONE_WALL && b_garrison[b] < 0) {
-                            const float gx = float(b_cell[b] % grid_dim) * CELL_SIZE + CELL_SIZE * 0.5f;
-                            const float gy = float(b_cell[b] / grid_dim) * CELL_SIZE + CELL_SIZE * 0.5f;
-                            const float gdx = gx - pos_x[i], gdy = gy - pos_y[i];
-                            if (gdx * gdx + gdy * gdy < 48.0f * 48.0f) { // 须贴墙（防陈旧指令瞬移）
+                if (target_cell[i] <= -2) { // 登墙意图：墙体有碰撞走不进墙心，贴近即攀上
+                    const int b = -2 - target_cell[i];
+                    if (b >= int(b_cell.size()) || b_hp[b] <= 0.0f ||
+                            b_type[b] != B_STONE_WALL) {
+                        target_cell[i] = -1; // 墙没了：继续普通行军
+                    } else {
+                        const float gx = float(b_cell[b] % grid_dim) * CELL_SIZE + CELL_SIZE * 0.5f;
+                        const float gy = float(b_cell[b] / grid_dim) * CELL_SIZE + CELL_SIZE * 0.5f;
+                        const float gdx = gx - pos_x[i], gdy = gy - pos_y[i];
+                        if (gdx * gdx + gdy * gdy < 48.0f * 48.0f) { // 贴墙（防陈旧指令瞬移）
+                            if (b_garrison[b] < 0) {
                                 b_garrison[b] = i;
                                 state[i] = U_GARRISON;
                                 pos_x[i] = gx;
@@ -809,12 +807,20 @@ void SimWorld::logic_pass(float p_dt) {
                                 slot_x[i] = gx; // 防止本 tick move_range 拖回旧槽位
                                 slot_y[i] = gy;
                                 timer[i] = 0.0f;
-                                claimed = true;
+                            } else {
+                                state[i] = U_IDLE; // 驻位已被占：墙脚待命
+                                target_cell[i] = -1;
                             }
+                            break;
                         }
-                        if (!claimed) {
-                            target_cell[i] = -1; // 驻位被占/墙已毁/没贴到墙：原地待命
-                        }
+                    }
+                }
+                const float sdx = slot_x[i] - pos_x[i];
+                const float sdy = slot_y[i] - pos_y[i];
+                if (sdx * sdx + sdy * sdy < 100.0f) { // 到达阵型槽位
+                    state[i] = U_IDLE;
+                    if (target_cell[i] <= -2) {
+                        target_cell[i] = -1; // 到了别处：放弃陈旧登墙意图
                     }
                     break;
                 }
@@ -1174,17 +1180,43 @@ void SimWorld::move_range(int p_begin, int p_end, float p_dt) {
         }
         // 地形速度系数：cost 10 → 1.0，cost 25 → 0.4
         float mult = FORM[formation[i]].speed;
-        if (map.is_valid()) {
+        const bool has_map = map.is_valid();
+        if (has_map) {
             const int32_t c = cell_of_pos(pos_x[i], pos_y[i]);
             const int mc = GameMap::terrain_move_cost(map->terrain_at(c % grid_dim, c / grid_dim));
-            // 不可通行地形（被直线追击/推挤挤进去时）重罚，正式地形碰撞后续做
-            mult *= (mc > 0) ? 10.0f / float(mc) : 0.25f;
+            mult *= (mc > 0) ? 10.0f / float(mc) : 1.0f; // 困在实体格（被放进去）时全速走出
         }
         const float spd = STATS[u_type[i]].speed;
         vel_x[i] = dx * spd * mult;
         vel_y[i] = dy * spd * mult;
-        pos_x[i] += vel_x[i] * p_dt;
-        pos_y[i] += vel_y[i] * p_dt;
+        float nx = pos_x[i] + vel_x[i] * p_dt;
+        float ny = pos_y[i] + vel_y[i] * p_dt;
+        if (has_map) {
+            // 真地形碰撞（按中心点判格）：换格进实体格 → 轴向滑动，都不行原地停。
+            // 自己所在格不算实体：困在里面的单位可以走出来。
+            const float inv_cell = 1.0f / CELL_SIZE;
+            const int ccx = int(pos_x[i] * inv_cell), ccy = int(pos_y[i] * inv_cell);
+            const uint8_t fac = faction[i];
+            auto blocked = [&](float p_wx, float p_wy) {
+                const int tx = int(p_wx * inv_cell), ty = int(p_wy * inv_cell);
+                return (tx != ccx || ty != ccy) && cell_blocked_for(tx, ty, fac);
+            };
+            if (blocked(nx, ny)) {
+                if (!blocked(nx, pos_y[i])) {
+                    ny = pos_y[i];
+                    vel_y[i] = 0.0f;
+                } else if (!blocked(pos_x[i], ny)) {
+                    nx = pos_x[i];
+                    vel_x[i] = 0.0f;
+                } else {
+                    nx = pos_x[i];
+                    ny = pos_y[i];
+                    vel_x[i] = vel_y[i] = 0.0f;
+                }
+            }
+        }
+        pos_x[i] = nx;
+        pos_y[i] = ny;
         // 冲锋动量：持续接近全速移动累积，停顿清零
         const float v2 = vel_x[i] * vel_x[i] + vel_y[i] * vel_y[i];
         if (v2 > 0.25f * spd * spd) {
@@ -1267,8 +1299,19 @@ void SimWorld::separate_range(int p_begin, int p_end) {
                 }
             }
         }
-        new_x[i] = std::clamp(px + push_x, lo, hi);
-        new_y[i] = std::clamp(py + push_y, lo, hi);
+        float nx = std::clamp(px + push_x, lo, hi);
+        float ny = std::clamp(py + push_y, lo, hi);
+        if (map.is_valid() && (push_x != 0.0f || push_y != 0.0f)) {
+            // 推挤不得把单位挤进实体格（地形/墙体/关着的门）
+            const int tx = int(nx * inv_cell), ty = int(ny * inv_cell);
+            const int ccx = int(px * inv_cell), ccy = int(py * inv_cell);
+            if ((tx != ccx || ty != ccy) && cell_blocked_for(tx, ty, faction[i])) {
+                nx = px;
+                ny = py;
+            }
+        }
+        new_x[i] = nx;
+        new_y[i] = ny;
     }
 }
 
@@ -1476,10 +1519,25 @@ void SimWorld::mark_occupancy(int p_b_index, uint8_t p_value) {
         for (int ox = 0; ox < fp; ox++) {
             const int nx = bx + ox, ny = by + oy;
             if (nx >= 0 && nx < grid_dim && ny >= 0 && ny < grid_dim) {
-                occupied[size_t(ny) * grid_dim + nx] = p_value;
+                occupied[size_t(ny) * grid_dim + nx] = p_value ? p_b_index + 1 : 0;
             }
         }
     }
+}
+
+bool SimWorld::cell_blocked_for(int p_cx, int p_cy, uint8_t p_faction) const {
+    if (p_cx < 0 || p_cx >= grid_dim || p_cy < 0 || p_cy >= grid_dim) {
+        return true;
+    }
+    if (!map->is_passable(p_cx, p_cy)) {
+        return true;
+    }
+    const int32_t occ = occupied[size_t(p_cy) * grid_dim + p_cx];
+    if (occ == 0) {
+        return false;
+    }
+    const int b = occ - 1;
+    return !(is_gate(b_type[b]) && p_faction == 0 && b_state[b] == 1); // 开门放行己方
 }
 
 bool SimWorld::can_place_building(int p_type, Vector2 p_world_pos) const {

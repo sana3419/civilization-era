@@ -27,6 +27,7 @@ func _init() -> void:
 	_bench_combat()
 	_bench_siege()
 	_bench_siege_engines()
+	_bench_collision()
 	_bench_golden()
 
 	print("=== done, failures: %d ===" % failures)
@@ -305,11 +306,15 @@ func _bench_combat() -> void:
 	print("morale: outnumbered militia fled %s" % [
 		_check(fled[0] and fled[1], "morale break"),
 	])
-	# 阵型：盾墙（防 ×1.5）5v5 应比无阵型 5v5（剩 1）打出更好的交换比
+	# 阵型：盾墙（防 ×1.5）5v5 战果应优于同场景无阵型（存活更多，或同存活总残血更高）
+	var wn := _run_combat_sim()
 	var ws := _run_shield_sim()
-	print("formation shield-wall 5v5: player %d vs bandit %d | %s" % [
-		ws.count_alive(0), ws.count_alive(1),
-		_check(ws.count_alive(1) == 0 and ws.count_alive(0) >= 2, "shield wall defense"),
+	var shield_better: bool = ws.count_alive(0) > wn.count_alive(0) or \
+			(ws.count_alive(0) == wn.count_alive(0) and _team_hp(ws, 5) > _team_hp(wn, 5))
+	print("formation shield-wall 5v5: player %d (hp %.0f) vs 无阵型 %d (hp %.0f), bandit %d | %s" % [
+		ws.count_alive(0), _team_hp(ws, 5), wn.count_alive(0), _team_hp(wn, 5),
+		ws.count_alive(1),
+		_check(ws.count_alive(1) == 0 and shield_better, "shield wall defense"),
 	])
 	# 骑兵：4 骑兵冲锋（克步兵 ×1.3 + 冲锋首击 ×1.5）应胜 5 土匪
 	var wc := _run_cavalry_sim()
@@ -388,13 +393,22 @@ func _run_tower_sim() -> SimWorld:
 	return w
 
 
+# 前 n 个单位（玩家方按出生序）的存活总血量
+func _team_hp(w: SimWorld, n: int) -> float:
+	var total := 0.0
+	for id in n:
+		if w.is_unit_alive(id):
+			total += w.get_unit_hp(id)
+	return total
+
+
 func _run_shield_sim() -> SimWorld:
 	var map := GameMap.new()
 	map.generate(512, 2026)
 	var w := SimWorld.new()
 	w.setup(0, 16384.0, 1, 6)
 	w.set_map(map)
-	var p := Vector2(260, 260) * 32.0
+	var p := _find_battlefield(map) # 真地形碰撞后不能再硬编码坐标（可能落在水里）
 	var first := w.spawn_units(1, 5, p - Vector2(80, 0), 0)
 	w.spawn_units(2, 5, p + Vector2(80, 0), 1)
 	var ids := PackedInt32Array(range(first, first + 5))
@@ -627,6 +641,31 @@ func _bench_siege_engines() -> void:
 		_check(c["destroyed"], "catapult kill"),
 		c["moved"], _check(c["moved"] < 24.0, "stand-off"),
 	])
+
+
+# 真地形碰撞：命令单位走进不可通行格，应被挡在外面（旧行为是 0.25 减速渗入）
+func _bench_collision() -> void:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var dim := map.get_dim()
+	var target := Vector2i(-1, -1) # 找一个左邻可通行的不可通行格
+	for cy in range(1, dim - 1):
+		for cx in range(1, dim - 1):
+			if not map.is_passable(cx, cy) and map.is_passable(cx - 1, cy):
+				target = Vector2i(cx, cy)
+				break
+		if target.x >= 0:
+			break
+	w.spawn_workers(1, Vector2(target.x - 1, target.y) * 32.0 + Vector2(16, 16))
+	w.command_move(PackedInt32Array([0]), Vector2(target) * 32.0 + Vector2(16, 16))
+	for i in 100:
+		w.tick(0.1)
+	var p: Vector2 = w.get_unit_positions(PackedInt32Array([0]))[0]
+	var cell := Vector2i(p / 32.0)
+	print("collision: unit at passable cell %s" % _check(map.is_passable(cell.x, cell.y), "terrain collision"))
 
 
 func _bench_golden() -> void:
