@@ -13,3 +13,4 @@ game/bin/*.dylib
 *.obj
 *.os
 __pycache__/
+.ipynb_checkpoints/
