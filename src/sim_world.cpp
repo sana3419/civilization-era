@@ -22,35 +22,14 @@ static inline float rand01(uint32_t &s) {
     return float(xorshift32(s) >> 8) * (1.0f / 16777216.0f);
 }
 
-// 把 [0, n) 切成 thread_count 块并行执行。f(begin, end) 只允许读共享旧状态、
-// 写本块单位自己的槽位，从而结果与线程数和调度顺序无关（确定性前提）。
-template <typename F>
-static void parallel_run(int p_threads, int p_n, F p_f) {
-    if (p_threads <= 1 || p_n < 256) {
-        p_f(0, p_n);
-        return;
-    }
-    std::vector<std::thread> pool;
-    pool.reserve(p_threads);
-    const int chunk = (p_n + p_threads - 1) / p_threads;
-    for (int t = 0; t < p_threads; t++) {
-        const int begin = t * chunk;
-        const int end = std::min(p_n, begin + chunk);
-        if (begin >= end) {
-            break;
-        }
-        pool.emplace_back([=] { p_f(begin, end); });
-    }
-    for (std::thread &th : pool) {
-        th.join();
-    }
-}
-
 void SimWorld::setup(int p_count, float p_world_size, int p_seed, int p_threads) {
     unit_count = p_count;
     world_size = p_world_size;
     thread_count = std::max(1, p_threads);
     tick_index = 0;
+    if (!pool || pool->worker_count() != thread_count) {
+        pool = std::make_unique<ThreadPool>(thread_count);
+    }
 
     grid_dim = std::max(1, int(world_size / CELL_SIZE));
 
@@ -183,9 +162,9 @@ void SimWorld::separate_range(int p_begin, int p_end) {
 }
 
 void SimWorld::tick(float p_dt) {
-    parallel_run(thread_count, unit_count, [&](int b, int e) { move_range(b, e, p_dt); });
+    pool->run(unit_count, [&](int b, int e) { move_range(b, e, p_dt); });
     build_grid();
-    parallel_run(thread_count, unit_count, [&](int b, int e) { separate_range(b, e); });
+    pool->run(unit_count, [&](int b, int e) { separate_range(b, e); });
     pos_x.swap(new_x);
     pos_y.swap(new_y);
     tick_index++;
@@ -195,7 +174,7 @@ void SimWorld::write_render_buffer() {
     // MultiMesh TRANSFORM_2D + custom_data 布局：每实例 12 float
     // [xx, yx, 0, ox, xy, yy, 0, oy, c0, c1, c2, c3]
     float *w = render_buffer.ptrw();
-    parallel_run(thread_count, unit_count, [&](int b, int e) {
+    pool->run(unit_count, [&](int b, int e) {
         for (int i = b; i < e; i++) {
             const float vx = vel_x[i];
             const float vy = vel_y[i];
@@ -223,6 +202,77 @@ void SimWorld::write_render_buffer() {
     });
 }
 
+// 存档格式 v1：magic "CIVW" + 版本号 + 标量 + SoA 数组原样字节。
+// 数据布局变更必须升版本号并写迁移逻辑（PLAN.md 第一阶段约束）。
+static constexpr uint32_t SAVE_MAGIC = 0x57564943; // "CIVW" LE
+static constexpr uint32_t SAVE_VERSION = 1;
+
+template <typename T>
+static void blob_write(godot::PackedByteArray &r_out, const T *p_data, size_t p_count) {
+    const size_t at = r_out.size();
+    r_out.resize(at + p_count * sizeof(T));
+    std::memcpy(r_out.ptrw() + at, p_data, p_count * sizeof(T));
+}
+
+template <typename T>
+static bool blob_read(const godot::PackedByteArray &p_in, size_t &r_at, T *p_data, size_t p_count) {
+    const size_t bytes = p_count * sizeof(T);
+    if (r_at + bytes > size_t(p_in.size())) {
+        return false;
+    }
+    std::memcpy(p_data, p_in.ptr() + r_at, bytes);
+    r_at += bytes;
+    return true;
+}
+
+godot::PackedByteArray SimWorld::save_state() const {
+    godot::PackedByteArray out;
+    blob_write(out, &SAVE_MAGIC, 1);
+    blob_write(out, &SAVE_VERSION, 1);
+    blob_write(out, &tick_index, 1);
+    const int32_t count = unit_count;
+    blob_write(out, &count, 1);
+    blob_write(out, &world_size, 1);
+    blob_write(out, pos_x.data(), pos_x.size());
+    blob_write(out, pos_y.data(), pos_y.size());
+    blob_write(out, vel_x.data(), vel_x.size());
+    blob_write(out, vel_y.data(), vel_y.size());
+    blob_write(out, way_x.data(), way_x.size());
+    blob_write(out, way_y.data(), way_y.size());
+    blob_write(out, rng_state.data(), rng_state.size());
+    return out;
+}
+
+bool SimWorld::load_state(const godot::PackedByteArray &p_data) {
+    size_t at = 0;
+    uint32_t magic = 0, version = 0;
+    if (!blob_read(p_data, at, &magic, 1) || magic != SAVE_MAGIC) {
+        return false;
+    }
+    if (!blob_read(p_data, at, &version, 1) || version != SAVE_VERSION) {
+        return false;
+    }
+    uint64_t saved_tick = 0;
+    int32_t count = 0;
+    float ws = 0.0f;
+    if (!blob_read(p_data, at, &saved_tick, 1) || !blob_read(p_data, at, &count, 1) ||
+            !blob_read(p_data, at, &ws, 1) || count < 0) {
+        return false;
+    }
+    setup(count, ws, 0, thread_count); // 分配数组，随后整体覆盖
+    tick_index = saved_tick;
+    if (!blob_read(p_data, at, pos_x.data(), pos_x.size()) ||
+            !blob_read(p_data, at, pos_y.data(), pos_y.size()) ||
+            !blob_read(p_data, at, vel_x.data(), vel_x.size()) ||
+            !blob_read(p_data, at, vel_y.data(), vel_y.size()) ||
+            !blob_read(p_data, at, way_x.data(), way_x.size()) ||
+            !blob_read(p_data, at, way_y.data(), way_y.size()) ||
+            !blob_read(p_data, at, rng_state.data(), rng_state.size())) {
+        return false;
+    }
+    return true;
+}
+
 int64_t SimWorld::state_hash() const {
     // FNV-1a 64，跑在位置数据上，golden test 用
     uint64_t h = 14695981039346656037ull;
@@ -247,6 +297,8 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_render_buffer"), &SimWorld::get_render_buffer);
     ClassDB::bind_method(D_METHOD("state_hash"), &SimWorld::state_hash);
     ClassDB::bind_method(D_METHOD("get_unit_count"), &SimWorld::get_unit_count);
+    ClassDB::bind_method(D_METHOD("save_state"), &SimWorld::save_state);
+    ClassDB::bind_method(D_METHOD("load_state", "data"), &SimWorld::load_state);
 }
 
 } // namespace cive

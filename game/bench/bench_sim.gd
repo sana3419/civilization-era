@@ -5,10 +5,13 @@ extends SceneTree
 const N := 10000
 const WORLD := 16384.0
 const LOOPS := 1000000
+const GOLDEN_PATH := "res://bench/golden_hash.txt"
+
+var failures := 0
 
 
 func _init() -> void:
-	print("=== CivEra Phase-0 headless bench ===")
+	print("=== CivEra headless bench ===")
 	var core := SimCore.new()
 	print("extension: ", core.get_version())
 
@@ -17,9 +20,19 @@ func _init() -> void:
 	_bench_tick()
 	_bench_buffer()
 	_bench_flow_field()
+	_bench_map()
+	_bench_astar()
+	_bench_saveload()
+	_bench_golden()
 
-	print("=== done ===")
-	quit()
+	print("=== done, failures: %d ===" % failures)
+	quit(0 if failures == 0 else 1)
+
+
+func _check(ok: bool, what: String) -> String:
+	if not ok:
+		failures += 1
+	return "PASS" if ok else "FAIL"
 
 
 func _bench_boundary(core: SimCore) -> void:
@@ -54,11 +67,9 @@ func _bench_determinism() -> void:
 		for i in 100:
 			w.tick(0.1)
 		hashes.append(w.state_hash())
-	var same_seed_ok := hashes[0] == hashes[1]
-	var thread_inv_ok := hashes[0] == hashes[2]
 	print("determinism: same-seed %s | thread-count-invariant %s (hash %d)" % [
-		"PASS" if same_seed_ok else "FAIL",
-		"PASS" if thread_inv_ok else "FAIL",
+		_check(hashes[0] == hashes[1], "same-seed"),
+		_check(hashes[0] == hashes[2], "thread-invariant"),
 		hashes[0],
 	])
 
@@ -112,3 +123,97 @@ func _bench_flow_field() -> void:
 			w.tick(0.1)
 		var ms := (Time.get_ticks_usec() - t0) / 1000.0 / 300.0
 		print("flow-follow tick %d units: %.3f ms/tick" % [count, ms])
+
+
+func _bench_map() -> void:
+	var map := GameMap.new()
+	var t0 := Time.get_ticks_usec()
+	for i in 5:
+		map.generate(512, 2026)
+	var ms := (Time.get_ticks_usec() - t0) / 1000.0 / 5.0
+
+	var buf := map.get_terrain_buffer()
+	var counts := {}
+	for b in buf:
+		counts[b] = counts.get(b, 0) + 1
+	var passable := 0
+	for cy in 512:
+		for cx in 512:
+			if map.is_passable(cx, cy):
+				passable += 1
+	var ratio := passable / float(512 * 512)
+	print("map generate 512x512: %.1f ms | passable %.0f%% %s | terrain kinds %d" % [
+		ms, ratio * 100.0, _check(ratio > 0.3 and ratio < 0.9, "passable ratio"), counts.size(),
+	])
+
+
+func _bench_astar() -> void:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var pf := Pathfinder.new()
+	pf.set_map(map)
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 1234
+	var pairs: Array[Vector2i] = []
+	while pairs.size() < 200: # 100 对
+		var p := Vector2i(rng.randi_range(0, 511), rng.randi_range(0, 511))
+		if map.is_passable(p.x, p.y):
+			pairs.append(p)
+
+	var ok := 0
+	var total_len := 0
+	var t0 := Time.get_ticks_usec()
+	for i in 100:
+		var path := pf.find_path(pairs[i * 2], pairs[i * 2 + 1], 200000)
+		if path.size() > 0:
+			ok += 1
+			total_len += path.size()
+	var ms := (Time.get_ticks_usec() - t0) / 1000.0 / 100.0
+	print("A* 100 random paths: %.2f ms avg | success %d/100 | avg len %d" % [
+		ms, ok, total_len / maxi(ok, 1),
+	])
+
+
+func _bench_saveload() -> void:
+	var w1 := SimWorld.new()
+	w1.setup(N, WORLD, 42, 6)
+	for i in 100:
+		w1.tick(0.1)
+	var data := w1.save_state()
+
+	var w2 := SimWorld.new()
+	w2.setup(1, 100.0, 0, 6) # 故意不同，验证 load 完全覆盖
+	var loaded := w2.load_state(data)
+	# 双方再各跑 50 tick，验证"读档后继续模拟"与原世界逐位一致
+	for i in 50:
+		w1.tick(0.1)
+		w2.tick(0.1)
+	print("save/load: load %s | resume-equivalence %s | %d bytes" % [
+		_check(loaded, "load"),
+		_check(w1.state_hash() == w2.state_hash(), "resume"),
+		data.size(),
+	])
+
+
+func _bench_golden() -> void:
+	var w := SimWorld.new()
+	w.setup(N, WORLD, 42, 6)
+	for i in 500:
+		w.tick(0.1)
+	var sim_hash := w.state_hash()
+
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var map_hash := hash(map.get_terrain_buffer())
+
+	var current := "%d\n%d" % [sim_hash, map_hash]
+	if not FileAccess.file_exists(GOLDEN_PATH):
+		var f := FileAccess.open(GOLDEN_PATH, FileAccess.WRITE)
+		f.store_string(current)
+		print("golden: initialized (sim %d, map %d)" % [sim_hash, map_hash])
+		return
+	var expected := FileAccess.get_file_as_string(GOLDEN_PATH)
+	print("golden: %s (sim %d, map %d)" % [
+		_check(expected.strip_edges() == current.strip_edges(), "golden"), sim_hash, map_hash,
+	])

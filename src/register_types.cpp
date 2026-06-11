@@ -1,4 +1,6 @@
 #include "flow_field.h"
+#include "game_map.h"
+#include "pathfinder.h"
 #include "sim_core.h"
 #include "sim_world.h"
 
@@ -16,6 +18,8 @@ static void initialize_sim_core(ModuleInitializationLevel p_level) {
     GDREGISTER_CLASS(cive::SimCore);
     GDREGISTER_CLASS(cive::SimWorld);
     GDREGISTER_CLASS(cive::FlowField);
+    GDREGISTER_CLASS(cive::GameMap);
+    GDREGISTER_CLASS(cive::Pathfinder);
 }
 
 static void uninitialize_sim_core(ModuleInitializationLevel p_level) {

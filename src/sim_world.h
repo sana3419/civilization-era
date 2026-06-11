@@ -1,11 +1,14 @@
 #pragma once
 
 #include "flow_field.h"
+#include "thread_pool.h"
 
 #include <godot_cpp/classes/ref_counted.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace cive {
@@ -40,6 +43,7 @@ class SimWorld : public godot::RefCounted {
 
     godot::PackedFloat32Array render_buffer;
     godot::Ref<FlowField> flow_field; // 有效时移动阶段走流场，否则走随机路径点
+    std::unique_ptr<ThreadPool> pool;
 
     void move_range(int p_begin, int p_end, float p_dt);
     void separate_range(int p_begin, int p_end);
@@ -53,6 +57,9 @@ public:
     godot::PackedFloat32Array get_render_buffer() const { return render_buffer; }
     int64_t state_hash() const;
     int get_unit_count() const { return unit_count; }
+
+    godot::PackedByteArray save_state() const;
+    bool load_state(const godot::PackedByteArray &p_data);
 
 protected:
     static void _bind_methods();
