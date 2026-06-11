@@ -52,6 +52,8 @@ jobs:
         run: |
           curl -sL -o godot.zip https://github.com/godotengine/godot-builds/releases/download/4.6-stable/Godot_v4.6-stable_linux.x86_64.zip
           unzip -q godot.zip && chmod +x Godot_v4.6-stable_linux.x86_64
+          # 先 import 注册 GDExtension（extension_list.cfg 在 .godot/ 不入库）
+          ./Godot_v4.6-stable_linux.x86_64 --headless --path game --import || true
           ./Godot_v4.6-stable_linux.x86_64 --headless --path game -s bench/bench_sim.gd
 
       - uses: actions/upload-artifact@v4

@@ -23,6 +23,22 @@ enum UnitState : uint8_t {
     U_MOVING = 2, // 移向 goal_cell + 阵型槽位，到达转 IDLE
     U_GATHER = 3, // 移向 target_cell 资源格并采集
     U_RETURN = 4, // 满载运回最近有效存储点
+    U_ATTACK = 5, // 追击 attack_target 并近战
+};
+
+enum UnitType : uint8_t {
+    UT_WORKER = 0,
+    UT_MILITIA = 1, // 民兵
+    UT_BANDIT = 2, // 土匪
+    UT_COUNT = 3,
+};
+
+struct UnitStats {
+    float max_hp;
+    float damage;
+    float attack_range; // px
+    float attack_interval; // 秒
+    float aggro_range; // px，0 = 不主动索敌
 };
 
 enum BuildingType : uint8_t {
@@ -32,7 +48,8 @@ enum BuildingType : uint8_t {
     B_FARM = 3, // 农田：食物存储点
     B_HOUSE = 4, // 房屋（人口，暂占位）
     B_STOREHOUSE = 5, // 仓库：万能存储点
-    B_COUNT = 6,
+    B_BARRACKS = 6, // 兵营：训练民兵
+    B_COUNT = 7,
 };
 
 // 模拟世界：SoA、确定性、串行状态机 + 并行移动/分离。
@@ -63,8 +80,13 @@ class SimWorld : public godot::RefCounted {
     std::vector<int32_t> target_cell; // 采集资源格，-1 = 无
     std::vector<uint8_t> carry; // 携带量
     std::vector<uint8_t> carry_type; // RES_*
-    std::vector<float> timer; // 采集计时
-    std::vector<float> slot_x, slot_y; // 编队到达槽位（世界坐标）
+    std::vector<float> timer; // 采集计时 / 攻击冷却（互斥使用）
+    std::vector<float> slot_x, slot_y; // 编队到达槽位 / 追击点（世界坐标）
+    std::vector<uint8_t> u_type; // UT_*
+    std::vector<uint8_t> faction; // 0 = 玩家，1 = 土匪
+    std::vector<uint8_t> alive;
+    std::vector<float> hp;
+    std::vector<int32_t> attack_target; // 单位 id，-1 = 无
 
     // 建筑（序列化范围）：2×2 占地，锚点为左上格
     std::vector<uint8_t> b_type;
@@ -101,6 +123,7 @@ class SimWorld : public godot::RefCounted {
     bool cell_adjacent(int32_t p_a, int32_t p_b) const;
     int32_t nearest_dropoff(int p_res_type, int32_t p_from_cell) const;
     void mark_occupancy(int p_b_index, uint8_t p_value);
+    int32_t find_nearest_enemy(int p_unit, float p_range) const; // 用上一 tick 的空间网格
 
 public:
     void setup(int p_count, float p_world_size, int p_seed, int p_threads);
@@ -109,6 +132,8 @@ public:
     void set_dropoff(godot::Vector2 p_world_pos);
 
     int spawn_workers(int p_count, godot::Vector2 p_world_pos);
+    int spawn_units(int p_type, int p_count, godot::Vector2 p_world_pos, int p_faction);
+    bool try_spend(int p_wood, int p_stone, int p_food); // 资源足够则扣除
     void command_move(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_gather(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
 
@@ -121,6 +146,10 @@ public:
     godot::PackedVector2Array get_unit_positions(const godot::PackedInt32Array &p_ids) const;
     int get_unit_state(int p_id) const;
     int get_unit_carry(int p_id) const;
+    int get_unit_type(int p_id) const;
+    float get_unit_hp(int p_id) const;
+    bool is_unit_alive(int p_id) const;
+    int count_alive(int p_faction) const;
     int64_t get_stockpile(int p_type) const;
 
     void tick(float p_dt);

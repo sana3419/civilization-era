@@ -24,6 +24,7 @@ func _init() -> void:
 	_bench_astar()
 	_bench_saveload()
 	_bench_gather()
+	_bench_combat()
 	_bench_golden()
 
 	print("=== done, failures: %d ===" % failures)
@@ -236,6 +237,46 @@ func _bench_gather() -> void:
 	print("gather: 20 workers, 1200 ticks → wood %d %s | determinism %s | %.0f ms total" % [
 		wood, _check(wood > 0, "gather yield"),
 		_check(w1.state_hash() == w2.state_hash(), "gather determinism"), ms,
+	])
+
+
+func _run_combat_sim() -> SimWorld:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	# 找一片开阔草地当战场
+	var bc := Vector2i(-1, -1)
+	for cy in range(150, 400):
+		for cx in range(150, 400):
+			var ok := true
+			for oy in range(-3, 4):
+				for ox in range(-3, 4):
+					if map.get_terrain(cx + ox, cy + oy) != 3: # 草地
+						ok = false
+			if ok:
+				bc = Vector2i(cx, cy)
+				break
+		if bc.x >= 0:
+			break
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var p := Vector2(bc) * 32.0
+	w.spawn_units(1, 5, p - Vector2(80, 0), 0) # 5 民兵
+	w.spawn_units(2, 5, p + Vector2(80, 0), 1) # 5 土匪，间距 160 = 仇恨边缘
+	for i in 900: # 90 秒
+		w.tick(0.1)
+	return w
+
+
+func _bench_combat() -> void:
+	var w1 := _run_combat_sim()
+	var w2 := _run_combat_sim()
+	var p_alive := w1.count_alive(0)
+	var b_alive := w1.count_alive(1)
+	print("combat 5v5: player %d vs bandit %d alive | resolved %s | determinism %s" % [
+		p_alive, b_alive,
+		_check(p_alive == 0 or b_alive == 0, "combat resolved"),
+		_check(w1.state_hash() == w2.state_hash(), "combat determinism"),
 	])
 
 

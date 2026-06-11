@@ -23,7 +23,10 @@ const BUILDINGS := [
 	{ "name": "农田", "color": Color("a8a832") },
 	{ "name": "房屋", "color": Color("a87850") },
 	{ "name": "仓库", "color": Color("7a5a8a") },
+	{ "name": "兵营", "color": Color("8a3a3a") },
 ]
+const MILITIA_COST := { "wood": 10, "food": 20 }
+const UNIT_MAX_HP := [100.0, 60.0, 60.0] # 与 src/sim_world.h STATS 对应
 
 var map: GameMap
 var sim: SimWorld
@@ -41,6 +44,7 @@ var info_label := Label.new()
 var minimap := Control.new()
 var minimap_base: ImageTexture
 var place_mode := -1 # 建造放置模式：建筑类型，-1 = 关闭
+var bandit_pos := Vector2.ZERO
 var ghost := ColorRect.new()
 var shot_timer := 0.0
 
@@ -60,6 +64,7 @@ func _ready() -> void:
 	sim.place_building(0, camp_pos) # 营地（免费初始建筑）
 	_add_building_visual(0, camp_cell)
 	sim.spawn_workers(START_WORKERS, camp_pos + Vector2(0, TILE * 2.5))
+	_spawn_bandit_camp(camp_cell)
 	_sync_unit_mesh()
 
 	camera.position = camp_pos
@@ -75,10 +80,15 @@ func _ready() -> void:
 	add_child(ghost)
 
 	if OS.get_environment("CIVERA_SHOT") != "":
-		selected = PackedInt32Array(range(sim.get_unit_count()))
+		selected = PackedInt32Array(range(START_WORKERS))
 		var forest := _find_nearest_terrain(camp_cell, 4)
 		if forest.x >= 0:
 			sim.command_gather(selected, (Vector2(forest) + Vector2(0.5, 0.5)) * TILE)
+		# 战斗验证：土匪营旁放 6 民兵，自动交战；相机对准战场
+		sim.spawn_units(1, 6, bandit_pos + Vector2(-140, 0), 0)
+		_sync_unit_mesh()
+		camera.position = bandit_pos
+		camera.zoom = Vector2(2, 2)
 
 
 func _find_camp_cell() -> Vector2i:
@@ -99,6 +109,23 @@ func _find_camp_cell() -> Vector2i:
 				if ok:
 					return Vector2i(c + ox, c + oy)
 	return Vector2i(c, c)
+
+
+func _spawn_bandit_camp(camp_cell: Vector2i) -> void:
+	# 营地 40~80 格外找开阔地驻扎土匪（第一章目标：击退土匪）
+	for r in range(40, 80, 4):
+		for ang in 8:
+			var dir := Vector2.from_angle(ang * TAU / 8.0)
+			var c := camp_cell + Vector2i((dir * r).round())
+			var ok := true
+			for oy in range(-2, 3):
+				for ox in range(-2, 3):
+					if not map.is_passable(c.x + ox, c.y + oy):
+						ok = false
+			if ok:
+				bandit_pos = Vector2(c) * TILE + Vector2(16, 16)
+				sim.spawn_units(2, 5, bandit_pos, 1)
+				return
 
 
 func _find_nearest_terrain(from: Vector2i, terrain_id: int) -> Vector2i:
@@ -173,11 +200,15 @@ func _sync_unit_mesh() -> void:
 
 
 func _make_unit_atlas() -> ImageTexture:
-	var img := Image.create(16 * 6, 16, false, Image.FORMAT_RGBA8)
-	for f in 6:
-		var c := Color(0.25, 0.45, 0.9).lightened(0.06 * (f % 3))
-		img.fill_rect(Rect2i(f * 16 + 3, 3, 10, 10), c)
-		img.fill_rect(Rect2i(f * 16 + 5, 1, 6, 4), Color(0.95, 0.8, 0.6))
+	# 3 行 × 6 帧：工人（蓝）/ 民兵（银甲红缨）/ 土匪（暗红）
+	var body := [Color(0.25, 0.45, 0.9), Color(0.7, 0.7, 0.78), Color(0.55, 0.15, 0.15)]
+	var head := [Color(0.95, 0.8, 0.6), Color(0.85, 0.2, 0.2), Color(0.3, 0.25, 0.2)]
+	var img := Image.create(16 * 6, 16 * 3, false, Image.FORMAT_RGBA8)
+	for row in 3:
+		for f in 6:
+			var c: Color = body[row].lightened(0.06 * (f % 3))
+			img.fill_rect(Rect2i(f * 16 + 3, row * 16 + 3, 10, 10), c)
+			img.fill_rect(Rect2i(f * 16 + 5, row * 16 + 1, 6, 4), head[row])
 	return ImageTexture.create_from_image(img)
 
 
@@ -194,7 +225,8 @@ void vertex() {
 
 void fragment() {
 	float frame = floor(inst_custom.x);
-	vec2 uv = vec2((UV.x + frame) / 6.0, UV.y);
+	float row = floor(inst_custom.z); // 单位类型 → 图集行
+	vec2 uv = vec2((UV.x + frame) / 6.0, (UV.y + row) / 3.0);
 	COLOR = texture(TEXTURE, uv);
 	if (inst_custom.y > 0.0) {
 		COLOR.rgb = mix(COLOR.rgb, vec3(1.0, 0.85, 0.2), 0.45);
@@ -237,8 +269,28 @@ func _build_hud() -> void:
 		btn.add_theme_font_size_override("font_size", 14)
 		btn.pressed.connect(_enter_place_mode.bind(t))
 		hbox.add_child(btn)
+	var train := Button.new()
+	train.text = "训练民兵\n%d木 %d食" % [MILITIA_COST["wood"], MILITIA_COST["food"]]
+	train.add_theme_font_size_override("font_size", 14)
+	train.pressed.connect(_train_militia)
+	hbox.add_child(train)
 	bar.add_child(hbox)
 	layer.add_child(bar)
+
+
+func _train_militia() -> void:
+	var flat := sim.get_buildings()
+	for b in range(flat.size() / 2):
+		if flat[b * 2] == 6: # 兵营
+			if sim.try_spend(MILITIA_COST["wood"], 0, MILITIA_COST["food"]):
+				var cell := flat[b * 2 + 1]
+				var pos := Vector2(cell % MAP_DIM, cell / MAP_DIM) * TILE + Vector2(TILE, TILE * 3)
+				sim.spawn_units(1, 1, pos, 0)
+				_sync_unit_mesh()
+			else:
+				info_label.text = "资源不足"
+			return
+	info_label.text = "需要先建兵营"
 
 
 func _build_minimap() -> void:
@@ -269,9 +321,13 @@ func _draw_minimap() -> void:
 		var p := Vector2(cell % MAP_DIM, cell / MAP_DIM) / MAP_DIM * 200.0
 		minimap.draw_rect(Rect2(p - Vector2(1.5, 1.5), Vector2(3, 3)), Color.ORANGE)
 	# 单位
-	var pts := sim.get_unit_positions(PackedInt32Array(range(sim.get_unit_count())))
-	for p in pts:
-		minimap.draw_rect(Rect2(p * mscale - Vector2(1, 1), Vector2(2, 2)), Color.WHITE)
+	var all_ids := PackedInt32Array(range(sim.get_unit_count()))
+	var pts := sim.get_unit_positions(all_ids)
+	for k in all_ids.size():
+		if not sim.is_unit_alive(all_ids[k]):
+			continue
+		var col := Color.RED if sim.get_unit_type(all_ids[k]) == 2 else Color.WHITE
+		minimap.draw_rect(Rect2(pts[k] * mscale - Vector2(1, 1), Vector2(2, 2)), col)
 	# 相机视口框
 	var vp_size := get_viewport_rect().size / camera.zoom.x
 	var r := Rect2((camera.position - vp_size * 0.5) * mscale, vp_size * mscale)
@@ -341,8 +397,9 @@ func _process(delta: float) -> void:
 				_add_building_visual(1, bcell)
 		if shot_timer > 6.0:
 			get_viewport().get_texture().get_image().save_png("/tmp/civera_game.png")
-			print("[shot] saved /tmp/civera_game.png | wood=%d buildings=%d" % [
+			print("[shot] saved /tmp/civera_game.png | wood=%d buildings=%d militia=%d bandits=%d" % [
 				sim.get_stockpile(0), sim.get_buildings().size() / 2,
+				sim.count_alive(0), sim.count_alive(1),
 			])
 			get_tree().quit()
 
@@ -350,8 +407,17 @@ func _process(delta: float) -> void:
 func _draw() -> void:
 	if selected.size() > 0:
 		var pts := sim.get_unit_positions(selected)
-		for p in pts:
+		for k in selected.size():
+			var id := selected[k]
+			if not sim.is_unit_alive(id):
+				continue
+			var p := pts[k]
 			draw_arc(p, 11.0, 0, TAU, 24, Color(0.3, 1.0, 0.3, 0.9), 2.0)
+			# 血条
+			var ratio: float = sim.get_unit_hp(id) / UNIT_MAX_HP[sim.get_unit_type(id)]
+			draw_rect(Rect2(p + Vector2(-9, -15), Vector2(18, 3)), Color(0, 0, 0, 0.7))
+			draw_rect(Rect2(p + Vector2(-9, -15), Vector2(18 * ratio, 3)),
+					Color(1.0 - ratio, ratio, 0.1))
 	if dragging:
 		var rect := _drag_rect()
 		draw_rect(rect, Color(0.4, 1.0, 0.4, 0.12), true)
