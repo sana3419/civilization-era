@@ -94,7 +94,7 @@ func _bench_buffer() -> void:
 	w.tick(0.1)
 	var t0 := Time.get_ticks_usec()
 	for i in 300:
-		w.write_render_buffer()
+		w.write_render_buffer(1.0)
 	var ms := (Time.get_ticks_usec() - t0) / 1000.0 / 300.0
 	var buf := w.get_render_buffer()
 	print("write_render_buffer %d units: %.3f ms (%d floats)" % [N, ms, buf.size()])

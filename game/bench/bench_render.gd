@@ -52,7 +52,7 @@ func _process(delta: float) -> void:
 	tick_ms = (Time.get_ticks_usec() - t0) / 1000.0
 
 	t0 = Time.get_ticks_usec()
-	world.write_render_buffer()
+	world.write_render_buffer(1.0)
 	RenderingServer.multimesh_set_buffer(mm.get_rid(), world.get_render_buffer())
 	upload_ms = (Time.get_ticks_usec() - t0) / 1000.0
 

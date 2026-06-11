@@ -20,9 +20,19 @@ namespace cive {
 enum UnitState : uint8_t {
     U_WANDER = 0, // 压测模式：随机路径点游走
     U_IDLE = 1,
-    U_MOVING = 2, // 移向 goal_cell，到达转 IDLE
+    U_MOVING = 2, // 移向 goal_cell + 阵型槽位，到达转 IDLE
     U_GATHER = 3, // 移向 target_cell 资源格并采集
-    U_RETURN = 4, // 满载运回 dropoff
+    U_RETURN = 4, // 满载运回最近有效存储点
+};
+
+enum BuildingType : uint8_t {
+    B_CAMP = 0, // 营地：万能存储点
+    B_LUMBER = 1, // 伐木场：木材存储点
+    B_QUARRY = 2, // 采石场：石料存储点
+    B_FARM = 3, // 农田：食物存储点
+    B_HOUSE = 4, // 房屋（人口，暂占位）
+    B_STOREHOUSE = 5, // 仓库：万能存储点
+    B_COUNT = 6,
 };
 
 // 模拟世界：SoA、确定性、串行状态机 + 并行移动/分离。
@@ -54,12 +64,19 @@ class SimWorld : public godot::RefCounted {
     std::vector<uint8_t> carry; // 携带量
     std::vector<uint8_t> carry_type; // RES_*
     std::vector<float> timer; // 采集计时
+    std::vector<float> slot_x, slot_y; // 编队到达槽位（世界坐标）
+
+    // 建筑（序列化范围）：2×2 占地，锚点为左上格
+    std::vector<uint8_t> b_type;
+    std::vector<int32_t> b_cell;
 
     int64_t stockpile[RES_COUNT] = { 0, 0, 0 };
     int32_t dropoff_cell = -1;
 
     // 运行时（不序列化）
     std::vector<float> new_x, new_y;
+    std::vector<float> prev_x, prev_y; // 渲染插值
+    std::vector<uint8_t> occupied; // 建筑占地位图（由 b_* 重建）
     std::vector<const FlowField *> unit_field; // 本 tick 各单位用的流场
     godot::Ref<GameMap> map;
     std::unordered_map<int32_t, godot::Ref<FlowField>> field_cache;
@@ -82,6 +99,8 @@ class SimWorld : public godot::RefCounted {
     int32_t cell_of_pos(float p_x, float p_y) const;
     int32_t find_nearest_resource(int32_t p_from_cell, int p_res_type) const;
     bool cell_adjacent(int32_t p_a, int32_t p_b) const;
+    int32_t nearest_dropoff(int p_res_type, int32_t p_from_cell) const;
+    void mark_occupancy(int p_b_index, uint8_t p_value);
 
 public:
     void setup(int p_count, float p_world_size, int p_seed, int p_threads);
@@ -93,6 +112,11 @@ public:
     void command_move(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_gather(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
 
+    bool can_place_building(int p_type, godot::Vector2 p_world_pos) const;
+    bool place_building(int p_type, godot::Vector2 p_world_pos);
+    godot::PackedInt32Array get_buildings() const; // 扁平 [type, cell, ...]
+    static godot::Vector2i building_cost(int p_type); // (木材, 石料)
+
     godot::PackedInt32Array get_units_in_rect(godot::Vector2 p_min, godot::Vector2 p_max) const;
     godot::PackedVector2Array get_unit_positions(const godot::PackedInt32Array &p_ids) const;
     int get_unit_state(int p_id) const;
@@ -100,7 +124,7 @@ public:
     int64_t get_stockpile(int p_type) const;
 
     void tick(float p_dt);
-    void write_render_buffer();
+    void write_render_buffer(float p_alpha); // p_alpha: 上 tick→本 tick 插值系数
     godot::PackedFloat32Array get_render_buffer() const { return render_buffer; }
     int64_t state_hash() const;
     int get_unit_count() const { return unit_count; }

@@ -35,9 +35,13 @@ void SimWorld::resize_arrays(int p_count) {
     carry.resize(p_count, 0);
     carry_type.resize(p_count, 0);
     timer.resize(p_count, 0.0f);
+    slot_x.resize(p_count, 0.0f);
+    slot_y.resize(p_count, 0.0f);
 
     new_x.resize(p_count);
     new_y.resize(p_count);
+    prev_x.resize(p_count);
+    prev_y.resize(p_count);
     unit_field.resize(p_count, nullptr);
     cell_of.resize(p_count);
     cell_entries.resize(p_count);
@@ -56,8 +60,11 @@ void SimWorld::setup(int p_count, float p_world_size, int p_seed, int p_threads)
     grid_dim = std::max(1, int(world_size / CELL_SIZE));
     resize_arrays(unit_count);
     cell_starts.assign(size_t(grid_dim) * grid_dim + 1, 0);
+    occupied.assign(size_t(grid_dim) * grid_dim, 0);
     std::fill(stockpile, stockpile + RES_COUNT, 0);
     dropoff_cell = -1;
+    b_type.clear();
+    b_cell.clear();
     field_cache.clear();
 
     // 压测模式出生：中心 1/4 区域随机（rng 采样顺序不可变，golden 依赖）
@@ -72,6 +79,8 @@ void SimWorld::setup(int p_count, float p_world_size, int p_seed, int p_threads)
         way_x[i] = center + (rand01(rng_state[i]) * 2.0f - 1.0f) * half;
         way_y[i] = center + (rand01(rng_state[i]) * 2.0f - 1.0f) * half;
         state[i] = U_WANDER;
+        prev_x[i] = pos_x[i];
+        prev_y[i] = pos_y[i];
     }
 }
 
@@ -81,6 +90,7 @@ void SimWorld::set_map(const Ref<GameMap> &p_map) {
         world_size = map->get_dim() * CELL_SIZE;
         grid_dim = map->get_dim();
         cell_starts.assign(size_t(grid_dim) * grid_dim + 1, 0);
+        occupied.assign(size_t(grid_dim) * grid_dim, 0);
     }
     field_cache.clear();
 }
@@ -122,6 +132,8 @@ int SimWorld::spawn_workers(int p_count, Vector2 p_world_pos) {
         carry[i] = 0;
         carry_type[i] = 0;
         timer[i] = 0.0f;
+        prev_x[i] = pos_x[i];
+        prev_y[i] = pos_y[i];
     }
     return first;
 }
@@ -134,6 +146,14 @@ const FlowField *SimWorld::ensure_field(int32_t p_goal) {
     Ref<FlowField> ff;
     ff.instantiate();
     ff->setup_from_map(map.ptr(), CELL_SIZE);
+    for (size_t b = 0; b < b_cell.size(); b++) { // 建筑占地阻挡
+        const int bx = b_cell[b] % grid_dim, by = b_cell[b] / grid_dim;
+        for (int oy = 0; oy < 2; oy++) {
+            for (int ox = 0; ox < 2; ox++) {
+                ff->set_blocked(bx + ox, by + oy);
+            }
+        }
+    }
     ff->generate(p_goal % grid_dim, p_goal / grid_dim);
     field_cache[p_goal] = ff;
     return ff.ptr();
@@ -141,13 +161,19 @@ const FlowField *SimWorld::ensure_field(int32_t p_goal) {
 
 void SimWorld::command_move(const PackedInt32Array &p_ids, Vector2 p_world_pos) {
     const int32_t goal = cell_of_pos(p_world_pos.x, p_world_pos.y);
-    for (int k = 0; k < p_ids.size(); k++) {
+    // 方阵阵型槽位：按选中顺序排格，间距 20px，整体居中于目标点
+    const int n = p_ids.size();
+    const int cols = std::max(1, int(std::ceil(std::sqrt(float(n)))));
+    const float spacing = 20.0f;
+    for (int k = 0; k < n; k++) {
         const int i = p_ids[k];
         if (i < 0 || i >= unit_count || state[i] == U_WANDER) {
             continue;
         }
         state[i] = U_MOVING;
         goal_cell[i] = goal;
+        slot_x[i] = p_world_pos.x + (float(k % cols) - float(cols - 1) * 0.5f) * spacing;
+        slot_y[i] = p_world_pos.y + (float(k / cols) - float((n - 1) / cols) * 0.5f) * spacing;
         timer[i] = 0.0f;
     }
 }
@@ -210,16 +236,23 @@ void SimWorld::logic_pass(float p_dt) {
                 break;
 
             case U_MOVING: {
-                const int32_t cell = cell_of_pos(pos_x[i], pos_y[i]);
-                if (cell == goal_cell[i]) {
+                const float sdx = slot_x[i] - pos_x[i];
+                const float sdy = slot_y[i] - pos_y[i];
+                if (sdx * sdx + sdy * sdy < 100.0f) { // 到达阵型槽位
                     state[i] = U_IDLE;
                     break;
+                }
+                const int32_t cell = cell_of_pos(pos_x[i], pos_y[i]);
+                const int cx = cell % grid_dim, cy = cell / grid_dim;
+                const int gx = goal_cell[i] % grid_dim, gy = goal_cell[i] / grid_dim;
+                if (std::max(std::abs(cx - gx), std::abs(cy - gy)) <= 3) {
+                    break; // 近目标：unit_field 留空 → move_range 直线驶向槽位
                 }
                 const FlowField *ff = ensure_field(goal_cell[i]);
                 float dx, dy;
                 ff->sample_raw(pos_x[i], pos_y[i], dx, dy);
                 if (dx == 0.0f && dy == 0.0f) {
-                    state[i] = U_IDLE; // 到达流场终点或不可达
+                    state[i] = U_IDLE; // 流场终点或不可达
                     break;
                 }
                 unit_field[i] = ff;
@@ -245,7 +278,7 @@ void SimWorld::logic_pass(float p_dt) {
                         const int got = map->take_resource(size_t(target_cell[i]), GATHER_YIELD);
                         if (got > 0) {
                             carry[i] = uint8_t(got);
-                            if (dropoff_cell < 0) { // 无存储点：就地入库
+                            if (nearest_dropoff(carry_type[i], cell) < 0) { // 无存储点：就地入库
                                 stockpile[carry_type[i]] += carry[i];
                                 carry[i] = 0;
                             } else {
@@ -268,16 +301,23 @@ void SimWorld::logic_pass(float p_dt) {
 
             case U_RETURN: {
                 const int32_t cell = cell_of_pos(pos_x[i], pos_y[i]);
-                if (cell_adjacent(cell, dropoff_cell) || cell == dropoff_cell) {
+                const int32_t drop = nearest_dropoff(carry_type[i], cell);
+                if (drop < 0) { // 存储点消失：就地入库防卡死
+                    stockpile[carry_type[i]] += carry[i];
+                    carry[i] = 0;
+                    state[i] = U_IDLE;
+                    break;
+                }
+                if (cell_adjacent(cell, drop) || cell == drop) {
                     stockpile[carry_type[i]] += carry[i];
                     carry[i] = 0;
                     state[i] = U_GATHER; // 回去继续采
                     break;
                 }
-                const FlowField *ff = ensure_field(dropoff_cell);
+                const FlowField *ff = ensure_field(drop);
                 float dx, dy;
                 ff->sample_raw(pos_x[i], pos_y[i], dx, dy);
-                if (dx == 0.0f && dy == 0.0f) { // 存储点不可达：就地入库防卡死
+                if (dx == 0.0f && dy == 0.0f) { // 不可达：就地入库防卡死
                     stockpile[carry_type[i]] += carry[i];
                     carry[i] = 0;
                     state[i] = U_IDLE;
@@ -323,12 +363,25 @@ void SimWorld::move_range(int p_begin, int p_end, float p_dt) {
         }
 
         const FlowField *ff = unit_field[i];
+        float dx = 0.0f, dy = 0.0f;
         if (ff == nullptr) {
-            vel_x[i] = vel_y[i] = 0.0f;
-            continue;
+            if (state[i] == U_MOVING) { // 近目标直线驶向阵型槽位
+                const float sx = slot_x[i] - pos_x[i];
+                const float sy = slot_y[i] - pos_y[i];
+                const float d2 = sx * sx + sy * sy;
+                if (d2 > 1e-4f) {
+                    const float inv = 1.0f / std::sqrt(d2);
+                    dx = sx * inv;
+                    dy = sy * inv;
+                }
+            }
+            if (dx == 0.0f && dy == 0.0f) {
+                vel_x[i] = vel_y[i] = 0.0f;
+                continue;
+            }
+        } else {
+            ff->sample_raw(pos_x[i], pos_y[i], dx, dy);
         }
-        float dx, dy;
-        ff->sample_raw(pos_x[i], pos_y[i], dx, dy);
         // 地形速度系数：cost 10 → 1.0，cost 25 → 0.4
         float mult = 1.0f;
         if (map.is_valid()) {
@@ -412,6 +465,8 @@ void SimWorld::separate_range(int p_begin, int p_end) {
 }
 
 void SimWorld::tick(float p_dt) {
+    std::memcpy(prev_x.data(), pos_x.data(), pos_x.size() * sizeof(float));
+    std::memcpy(prev_y.data(), pos_y.data(), pos_y.size() * sizeof(float));
     if (field_cache.size() > FIELD_CACHE_MAX) {
         field_cache.clear(); // tick 开头清理，pass 内指针不会悬空
     }
@@ -424,31 +479,26 @@ void SimWorld::tick(float p_dt) {
     tick_index++;
 }
 
-void SimWorld::write_render_buffer() {
+void SimWorld::write_render_buffer(float p_alpha) {
     // MultiMesh TRANSFORM_2D + custom_data 布局：每实例 12 float
+    // 人形单位不随速度旋转（PLAN 美术降级梯子），仅按横向速度镜像
+    const float a = std::clamp(p_alpha, 0.0f, 1.0f);
     float *w = render_buffer.ptrw();
     pool->run(unit_count, [&](int b, int e) {
         for (int i = b; i < e; i++) {
-            const float vx = vel_x[i];
-            const float vy = vel_y[i];
-            const float len2 = vx * vx + vy * vy;
-            float c = 1.0f, s = 0.0f;
-            if (len2 > 1e-4f) {
-                const float inv = 1.0f / std::sqrt(len2);
-                c = vx * inv;
-                s = vy * inv;
-            }
+            const bool moving = vel_x[i] * vel_x[i] + vel_y[i] * vel_y[i] > 1.0f;
+            const float mirror = (vel_x[i] < -0.5f) ? -1.0f : 1.0f;
             float *o = w + size_t(i) * 12;
-            o[0] = c;
-            o[1] = -s;
+            o[0] = mirror;
+            o[1] = 0.0f;
             o[2] = 0.0f;
-            o[3] = pos_x[i];
-            o[4] = s;
-            o[5] = c;
+            o[3] = prev_x[i] + (pos_x[i] - prev_x[i]) * a;
+            o[4] = 0.0f;
+            o[5] = 1.0f;
             o[6] = 0.0f;
-            o[7] = pos_y[i];
-            o[8] = float((tick_index + uint64_t(i)) % 6);
-            o[9] = float(carry[i]) / 10.0f; // 载货指示（shader 可用）
+            o[7] = prev_y[i] + (pos_y[i] - prev_y[i]) * a;
+            o[8] = moving ? float((tick_index + uint64_t(i)) % 6) : 0.0f;
+            o[9] = float(carry[i]) / 10.0f; // 载货指示（shader 用）
             o[10] = 0.0f;
             o[11] = 0.0f;
         }
@@ -488,10 +538,124 @@ int64_t SimWorld::get_stockpile(int p_type) const {
     return (p_type >= 0 && p_type < RES_COUNT) ? stockpile[p_type] : 0;
 }
 
+// ---- 建筑 ----
+
+Vector2i SimWorld::building_cost(int p_type) { // (木材, 石料)
+    switch (p_type) {
+        case B_LUMBER:
+            return Vector2i(20, 0);
+        case B_QUARRY:
+            return Vector2i(20, 0);
+        case B_FARM:
+            return Vector2i(10, 0);
+        case B_HOUSE:
+            return Vector2i(15, 5);
+        case B_STOREHOUSE:
+            return Vector2i(30, 10);
+        default: // 营地（初始建筑）
+            return Vector2i(0, 0);
+    }
+}
+
+// 该建筑是否接收某资源
+static bool building_accepts(uint8_t p_btype, int p_res) {
+    switch (p_btype) {
+        case B_CAMP:
+        case B_STOREHOUSE:
+            return true;
+        case B_LUMBER:
+            return p_res == RES_WOOD;
+        case B_QUARRY:
+            return p_res == RES_STONE;
+        case B_FARM:
+            return p_res == RES_FOOD;
+        default:
+            return false;
+    }
+}
+
+int32_t SimWorld::nearest_dropoff(int p_res_type, int32_t p_from_cell) const {
+    const int fx = p_from_cell % grid_dim, fy = p_from_cell / grid_dim;
+    int32_t best = -1;
+    int best_d = INT32_MAX;
+    for (size_t b = 0; b < b_cell.size(); b++) {
+        if (!building_accepts(b_type[b], p_res_type)) {
+            continue;
+        }
+        const int bx = b_cell[b] % grid_dim, by = b_cell[b] / grid_dim;
+        const int d = std::max(std::abs(bx - fx), std::abs(by - fy));
+        if (d < best_d) {
+            best_d = d;
+            best = b_cell[b];
+        }
+    }
+    if (best < 0 && dropoff_cell >= 0) { // 兼容压测：无建筑时退回 set_dropoff
+        best = dropoff_cell;
+    }
+    return best;
+}
+
+void SimWorld::mark_occupancy(int p_b_index, uint8_t p_value) {
+    const int bx = b_cell[p_b_index] % grid_dim, by = b_cell[p_b_index] / grid_dim;
+    for (int oy = 0; oy < 2; oy++) {
+        for (int ox = 0; ox < 2; ox++) {
+            const int nx = bx + ox, ny = by + oy;
+            if (nx >= 0 && nx < grid_dim && ny >= 0 && ny < grid_dim) {
+                occupied[size_t(ny) * grid_dim + nx] = p_value;
+            }
+        }
+    }
+}
+
+bool SimWorld::can_place_building(int p_type, Vector2 p_world_pos) const {
+    if (map.is_null() || p_type < 0 || p_type >= B_COUNT) {
+        return false;
+    }
+    const int32_t anchor = cell_of_pos(p_world_pos.x, p_world_pos.y);
+    const int bx = anchor % grid_dim, by = anchor / grid_dim;
+    if (bx + 1 >= grid_dim || by + 1 >= grid_dim) {
+        return false;
+    }
+    for (int oy = 0; oy < 2; oy++) {
+        for (int ox = 0; ox < 2; ox++) {
+            if (!map->is_passable(bx + ox, by + oy) ||
+                    occupied[size_t(by + oy) * grid_dim + bx + ox]) {
+                return false;
+            }
+        }
+    }
+    const Vector2i cost = building_cost(p_type);
+    return stockpile[RES_WOOD] >= cost.x && stockpile[RES_STONE] >= cost.y;
+}
+
+bool SimWorld::place_building(int p_type, Vector2 p_world_pos) {
+    if (!can_place_building(p_type, p_world_pos)) {
+        return false;
+    }
+    const Vector2i cost = building_cost(p_type);
+    stockpile[RES_WOOD] -= cost.x;
+    stockpile[RES_STONE] -= cost.y;
+    b_type.push_back(uint8_t(p_type));
+    b_cell.push_back(cell_of_pos(p_world_pos.x, p_world_pos.y));
+    mark_occupancy(int(b_cell.size()) - 1, 1);
+    field_cache.clear(); // 占地变化，全部流场失效
+    return true;
+}
+
+PackedInt32Array SimWorld::get_buildings() const {
+    PackedInt32Array out;
+    out.resize(int(b_cell.size()) * 2);
+    for (size_t b = 0; b < b_cell.size(); b++) {
+        out[int(b) * 2] = b_type[b];
+        out[int(b) * 2 + 1] = b_cell[b];
+    }
+    return out;
+}
+
 // 存档格式 v2：+ 状态机数组 + 库存 + 存储点。
 // 数据布局变更必须升版本号；golden 基线随逻辑变更重置（删 golden_hash.txt 重新初始化）。
 static constexpr uint32_t SAVE_MAGIC = 0x57564943; // "CIVW" LE
-static constexpr uint32_t SAVE_VERSION = 2;
+static constexpr uint32_t SAVE_VERSION = 3; // v3: + 阵型槽位 + 建筑
 
 template <typename T>
 static void blob_write(PackedByteArray &r_out, const T *p_data, size_t p_count) {
@@ -534,6 +698,12 @@ PackedByteArray SimWorld::save_state() const {
     blob_write(out, carry.data(), carry.size());
     blob_write(out, carry_type.data(), carry_type.size());
     blob_write(out, timer.data(), timer.size());
+    blob_write(out, slot_x.data(), slot_x.size());
+    blob_write(out, slot_y.data(), slot_y.size());
+    const int32_t n_buildings = int32_t(b_cell.size());
+    blob_write(out, &n_buildings, 1);
+    blob_write(out, b_type.data(), b_type.size());
+    blob_write(out, b_cell.data(), b_cell.size());
     return out;
 }
 
@@ -569,9 +739,26 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
             !blob_read(p_data, at, target_cell.data(), target_cell.size()) ||
             !blob_read(p_data, at, carry.data(), carry.size()) ||
             !blob_read(p_data, at, carry_type.data(), carry_type.size()) ||
-            !blob_read(p_data, at, timer.data(), timer.size())) {
+            !blob_read(p_data, at, timer.data(), timer.size()) ||
+            !blob_read(p_data, at, slot_x.data(), slot_x.size()) ||
+            !blob_read(p_data, at, slot_y.data(), slot_y.size())) {
         return false;
     }
+    int32_t n_buildings = 0;
+    if (!blob_read(p_data, at, &n_buildings, 1) || n_buildings < 0) {
+        return false;
+    }
+    b_type.resize(n_buildings);
+    b_cell.resize(n_buildings);
+    if (!blob_read(p_data, at, b_type.data(), b_type.size()) ||
+            !blob_read(p_data, at, b_cell.data(), b_cell.size())) {
+        return false;
+    }
+    for (int b = 0; b < n_buildings; b++) { // 重建占地位图
+        mark_occupancy(b, 1);
+    }
+    std::memcpy(prev_x.data(), pos_x.data(), pos_x.size() * sizeof(float));
+    std::memcpy(prev_y.data(), pos_y.data(), pos_y.size() * sizeof(float));
     return true;
 }
 
@@ -590,6 +777,8 @@ int64_t SimWorld::state_hash() const {
     mix_bytes(state.data(), state.size());
     mix_bytes(carry.data(), carry.size());
     mix_bytes(stockpile, sizeof(stockpile));
+    mix_bytes(b_type.data(), b_type.size());
+    mix_bytes(b_cell.data(), b_cell.size() * 4);
     return int64_t(h);
 }
 
@@ -606,8 +795,12 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_unit_state", "id"), &SimWorld::get_unit_state);
     ClassDB::bind_method(D_METHOD("get_unit_carry", "id"), &SimWorld::get_unit_carry);
     ClassDB::bind_method(D_METHOD("get_stockpile", "type"), &SimWorld::get_stockpile);
+    ClassDB::bind_method(D_METHOD("can_place_building", "type", "world_pos"), &SimWorld::can_place_building);
+    ClassDB::bind_method(D_METHOD("place_building", "type", "world_pos"), &SimWorld::place_building);
+    ClassDB::bind_method(D_METHOD("get_buildings"), &SimWorld::get_buildings);
+    ClassDB::bind_static_method("SimWorld", D_METHOD("building_cost", "type"), &SimWorld::building_cost);
     ClassDB::bind_method(D_METHOD("tick", "dt"), &SimWorld::tick);
-    ClassDB::bind_method(D_METHOD("write_render_buffer"), &SimWorld::write_render_buffer);
+    ClassDB::bind_method(D_METHOD("write_render_buffer", "alpha"), &SimWorld::write_render_buffer);
     ClassDB::bind_method(D_METHOD("get_render_buffer"), &SimWorld::get_render_buffer);
     ClassDB::bind_method(D_METHOD("state_hash"), &SimWorld::state_hash);
     ClassDB::bind_method(D_METHOD("get_unit_count"), &SimWorld::get_unit_count);

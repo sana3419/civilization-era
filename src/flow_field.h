@@ -23,6 +23,13 @@ public:
     void setup(int p_dim, float p_cell_size, int p_seed, float p_blocked_ratio);
     void setup_from_map(const class GameMap *p_map, float p_cell_size);
     void generate(int p_target_cx, int p_target_cy);
+
+    // 叠加动态障碍（建筑占地），generate 前调用
+    inline void set_blocked(int p_cx, int p_cy) {
+        if (p_cx >= 0 && p_cx < dim && p_cy >= 0 && p_cy < dim) {
+            terrain_cost[size_t(p_cy) * dim + p_cx] = 255;
+        }
+    }
     godot::Vector2 sample(godot::Vector2 p_world_pos) const;
     int get_dim() const { return dim; }
 
