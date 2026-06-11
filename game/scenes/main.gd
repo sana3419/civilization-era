@@ -27,6 +27,8 @@ const BUILDINGS := [
 	{ "name": "射箭场", "color": Color("3a6a5a") },
 	{ "name": "马厩", "color": Color("7a5a30") },
 	{ "name": "箭塔", "color": Color("4a4a58") },
+	{ "name": "栅栏", "color": Color("9a7b4f") },
+	{ "name": "城门", "color": Color("c49a5a") },
 ]
 # 训练表：单位类型 → 所需建筑/成本（与 src/sim_world.h 对应）
 const TRAIN := [
@@ -175,16 +177,21 @@ func _build_tilemap() -> void:
 	add_child(layer)
 
 
-func _add_building_visual(type: int, anchor_cell: Vector2i) -> void:
+func _add_building_visual(type: int, anchor_cell: Vector2i, open := true) -> void:
+	var bsize: int = SimWorld.building_size(type)
 	var rect := ColorRect.new()
 	rect.color = BUILDINGS[type]["color"]
-	rect.size = Vector2(TILE * 2, TILE * 2)
+	if type == 11 and not open: # 关闭的城门加深
+		rect.color = rect.color.darkened(0.45)
+	rect.size = Vector2(TILE, TILE) * bsize
 	rect.position = Vector2(anchor_cell) * TILE
 	building_layer.add_child(rect)
+	if type == 10: # 栅栏段不挂名牌（太密）
+		return
 	var tag := Label.new()
-	tag.text = BUILDINGS[type]["name"]
-	tag.add_theme_font_size_override("font_size", 12)
-	tag.position = Vector2(2, TILE * 2 - 18)
+	tag.text = BUILDINGS[type]["name"] if type != 11 else ("门·开" if open else "门·关")
+	tag.add_theme_font_size_override("font_size", 12 if bsize == 2 else 8)
+	tag.position = Vector2(2, TILE * bsize - (18 if bsize == 2 else 12))
 	rect.add_child(tag)
 
 
@@ -193,8 +200,11 @@ func _rebuild_building_visuals() -> void:
 		child.queue_free()
 	var flat := sim.get_buildings()
 	for b in range(flat.size() / 2):
+		if sim.get_building_hp(b) <= 0.0: # 废墟不画
+			continue
 		var cell := flat[b * 2 + 1]
-		_add_building_visual(flat[b * 2], Vector2i(cell % MAP_DIM, cell / MAP_DIM))
+		_add_building_visual(flat[b * 2], Vector2i(cell % MAP_DIM, cell / MAP_DIM),
+				sim.get_building_state(b) == 1)
 
 
 func _sync_unit_mesh() -> void:
@@ -339,6 +349,8 @@ func _draw_minimap() -> void:
 	# 建筑
 	var flat := sim.get_buildings()
 	for b in range(flat.size() / 2):
+		if sim.get_building_hp(b) <= 0.0:
+			continue
 		var cell := flat[b * 2 + 1]
 		var p := Vector2(cell % MAP_DIM, cell / MAP_DIM) / MAP_DIM * 200.0
 		minimap.draw_rect(Rect2(p - Vector2(1.5, 1.5), Vector2(3, 3)), Color.ORANGE)
@@ -367,6 +379,7 @@ func _minimap_input(event: InputEvent) -> void:
 
 func _enter_place_mode(type: int) -> void:
 	place_mode = type
+	ghost.size = Vector2(TILE, TILE) * SimWorld.building_size(type)
 	ghost.visible = true
 
 
@@ -403,19 +416,15 @@ func _process(delta: float) -> void:
 	if unit_mm.instance_count > 0:
 		RenderingServer.multimesh_set_buffer(unit_mm.get_rid(), sim.get_render_buffer())
 
-	# 攻击特效：取本帧事件画箭线/挥击线，0.25 秒淡出；attacker < 0 为箭塔
+	# 攻击特效：取本帧事件画箭线/挥击线，0.25 秒淡出；负值为建筑 -(index+1)
 	var events := sim.take_attack_events()
 	var flat_b := sim.get_buildings()
 	for e in range(0, events.size(), 2):
-		var from_pos: Vector2
-		if events[e] < 0:
-			var bi := -events[e] - 1
-			var bcell := flat_b[bi * 2 + 1]
-			from_pos = Vector2(bcell % MAP_DIM, bcell / MAP_DIM) * TILE + Vector2(TILE, TILE)
-		else:
-			from_pos = sim.get_unit_positions(PackedInt32Array([events[e]]))[0]
-		var to_pos := sim.get_unit_positions(PackedInt32Array([events[e + 1]]))[0]
+		var from_pos := _event_pos(events[e], flat_b)
+		var to_pos := _event_pos(events[e + 1], flat_b)
 		attack_fx.append({ "from": from_pos, "to": to_pos, "ttl": 0.25 })
+	if sim.take_building_events().size() > 0: # 有建筑被摧毁，重画
+		_rebuild_building_visuals()
 	for fx in attack_fx:
 		fx["ttl"] -= delta
 	attack_fx = attack_fx.filter(func(fx): return fx["ttl"] > 0.0)
@@ -452,6 +461,16 @@ func _process(delta: float) -> void:
 			get_tree().quit()
 
 
+# 攻击事件端点 → 世界坐标（id >= 0 单位，否则建筑 -(index+1) 取占地中心）
+func _event_pos(id: int, flat_b: PackedInt32Array) -> Vector2:
+	if id >= 0:
+		return sim.get_unit_positions(PackedInt32Array([id]))[0]
+	var bi := -id - 1
+	var bcell := flat_b[bi * 2 + 1]
+	var half := SimWorld.building_size(flat_b[bi * 2]) * TILE * 0.5
+	return Vector2(bcell % MAP_DIM, bcell / MAP_DIM) * TILE + Vector2(half, half)
+
+
 func _draw() -> void:
 	for fx in attack_fx:
 		var a: float = fx["ttl"] / 0.25
@@ -481,6 +500,13 @@ func _drag_rect() -> Rect2:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion and place_mode == 10 \
+			and event.button_mask & MOUSE_BUTTON_MASK_LEFT:
+		# 栅栏拖动连放（按住左键划线）
+		var cell := Vector2i(get_global_mouse_position() / TILE)
+		if sim.place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1)):
+			_add_building_visual(place_mode, cell)
+		return
 	if event is InputEventMouseButton:
 		if event.pressed:
 			match event.button_index:
@@ -493,7 +519,8 @@ func _unhandled_input(event: InputEvent) -> void:
 						var cell := Vector2i(get_global_mouse_position() / TILE)
 						if sim.place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1)):
 							_add_building_visual(place_mode, cell)
-							if not Input.is_key_pressed(KEY_SHIFT): # Shift 连放
+							# Shift 连放；栅栏默认连放（拖动划线），右键/Esc 退出
+							if not Input.is_key_pressed(KEY_SHIFT) and place_mode != 10:
 								_exit_place_mode()
 					else:
 						dragging = true
@@ -511,9 +538,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_LEFT and dragging:
 			dragging = false
 			var rect := _drag_rect()
-			if rect.size.length() < 8.0:
+			var is_click := rect.size.length() < 8.0
+			if is_click:
 				rect = Rect2(rect.position - Vector2(12, 12), Vector2(24, 24))
 			selected = sim.get_units_in_rect(rect.position, rect.end)
+			# 空点己方城门 = 开/关切换
+			if is_click and selected.size() == 0 \
+					and sim.toggle_gate_at(get_global_mouse_position()):
+				_rebuild_building_visuals()
 
 
 func _unhandled_key_input(event: InputEvent) -> void:

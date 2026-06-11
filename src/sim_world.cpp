@@ -43,9 +43,30 @@ static float building_max_hp(uint8_t p_type) {
             return 400.0f;
         case B_CAMP:
             return 800.0f;
+        case B_PALISADE: // 设计文档防御建筑表
+            return 500.0f;
+        case B_GATE: // 木门（石质城门 3000 留给攻城阶段）
+            return 800.0f;
         default:
             return 300.0f;
     }
+}
+
+// 普通攻击对建筑的伤害修正（设计文档攻城伤害类型表"普通攻击"行；
+// 攻城器械的 ×1.5/×3.0 等留给攻城阶段）
+static float siege_mult(uint8_t p_type) {
+    switch (p_type) {
+        case B_PALISADE:
+            return 0.1f;
+        case B_GATE:
+            return 0.2f; // 城门是普攻唯一现实的突破口
+        default:
+            return 0.3f;
+    }
+}
+
+int SimWorld::building_footprint(int p_type) {
+    return (p_type == B_PALISADE || p_type == B_GATE) ? 1 : 2;
 }
 
 // 士气 → 战斗力修正（设计文档士气等级表）
@@ -150,7 +171,9 @@ void SimWorld::setup(int p_count, float p_world_size, int p_seed, int p_threads)
     b_cell.clear();
     b_hp.clear();
     b_timer.clear();
+    b_state.clear();
     field_cache.clear();
+    field_cache_dirty = false;
 
     // 压测模式出生：中心 1/4 区域随机（rng 采样顺序不可变，golden 依赖）
     const float center = world_size * 0.5f;
@@ -314,6 +337,42 @@ void SimWorld::on_unit_killed(int p_victim) {
     }
 }
 
+// 攻城目标：50 格内最近的玩家阻挡建筑，城门优先（设计：城门是突破口）。
+// 串行 logic_pass 调用，线性扫描建筑表（数量小），同距取低 index → 确定性。
+int32_t SimWorld::find_nearest_blocking_building(int p_unit) const {
+    constexpr int MAX_D = 50;
+    const int32_t cell = cell_of_pos(pos_x[p_unit], pos_y[p_unit]);
+    const int cx = cell % grid_dim, cy = cell / grid_dim;
+    int32_t best = -1;
+    int best_d = MAX_D + 1;
+    bool best_gate = false;
+    for (size_t b = 0; b < b_cell.size(); b++) {
+        if (b_hp[b] <= 0.0f) {
+            continue;
+        }
+        const bool gate = b_type[b] == B_GATE;
+        if (best >= 0 && best_gate && !gate) {
+            continue; // 已有城门候选，普通墙体不再考虑
+        }
+        const int bx = b_cell[b] % grid_dim, by = b_cell[b] / grid_dim;
+        const int d = std::max(std::abs(bx - cx), std::abs(by - cy));
+        if (d > MAX_D || (best >= 0 && gate == best_gate && d >= best_d)) {
+            continue;
+        }
+        best = int32_t(b);
+        best_d = d;
+        best_gate = gate;
+    }
+    return best;
+}
+
+void SimWorld::destroy_building(int p_b) {
+    b_hp[p_b] = 0.0f;
+    mark_occupancy(p_b, 0);
+    field_cache_dirty = true; // 占地变化；pass 内 unit_field 持裸指针，延迟到下个 tick 开头清
+    building_events.push_back(p_b);
+}
+
 bool SimWorld::try_spend(int p_wood, int p_stone, int p_food) {
     if (stockpile[RES_WOOD] < p_wood || stockpile[RES_STONE] < p_stone ||
             stockpile[RES_FOOD] < p_food) {
@@ -354,24 +413,32 @@ int32_t SimWorld::find_nearest_enemy(int p_unit, float p_range) const {
     return best;
 }
 
-const FlowField *SimWorld::ensure_field(int32_t p_goal) {
-    auto it = field_cache.find(p_goal);
+const FlowField *SimWorld::ensure_field(int32_t p_goal, uint8_t p_faction) {
+    const int64_t key = int64_t(p_goal) | (int64_t(p_faction) << 32);
+    auto it = field_cache.find(key);
     if (it != field_cache.end()) {
         return it->second.ptr();
     }
     Ref<FlowField> ff;
     ff.instantiate();
     ff->setup_from_map(map.ptr(), CELL_SIZE);
-    for (size_t b = 0; b < b_cell.size(); b++) { // 建筑占地阻挡
+    for (size_t b = 0; b < b_cell.size(); b++) { // 建筑占地阻挡（已摧毁的不挡）
+        if (b_hp[b] <= 0.0f) {
+            continue;
+        }
+        if (b_type[b] == B_GATE && p_faction == 0 && b_state[b] == 1) {
+            continue; // 开着的门只放行己方；敌方视角永远是墙（设计：需破坏通过）
+        }
+        const int fp = building_footprint(b_type[b]);
         const int bx = b_cell[b] % grid_dim, by = b_cell[b] / grid_dim;
-        for (int oy = 0; oy < 2; oy++) {
-            for (int ox = 0; ox < 2; ox++) {
+        for (int oy = 0; oy < fp; oy++) {
+            for (int ox = 0; ox < fp; ox++) {
                 ff->set_blocked(bx + ox, by + oy);
             }
         }
     }
     ff->generate(p_goal % grid_dim, p_goal / grid_dim);
-    field_cache[p_goal] = ff;
+    field_cache[key] = ff;
     return ff.ptr();
 }
 
@@ -628,10 +695,20 @@ void SimWorld::logic_pass(float p_dt) {
                 if (std::max(std::abs(cx - gx), std::abs(cy - gy)) <= 3) {
                     break; // 近目标：unit_field 留空 → move_range 直线驶向槽位
                 }
-                const FlowField *ff = ensure_field(goal_cell[i]);
+                const FlowField *ff = ensure_field(goal_cell[i], faction[i]);
                 float dx, dy;
                 ff->sample_raw(pos_x[i], pos_y[i], dx, dy);
                 if (dx == 0.0f && dy == 0.0f) {
+                    // 不可达：敌军把挡路的玩家墙体当攻城目标（城门优先）
+                    if (faction[i] != 0 && st.aggro_range > 0.0f) {
+                        const int32_t b = find_nearest_blocking_building(i);
+                        if (b >= 0) {
+                            attack_target[i] = -2 - b; // 建筑目标编码（-1 保留为"无目标"）
+                            state[i] = U_ATTACK;
+                            timer[i] = 0.0f;
+                            break;
+                        }
+                    }
                     state[i] = U_IDLE; // 流场终点或不可达
                     break;
                 }
@@ -668,7 +745,7 @@ void SimWorld::logic_pass(float p_dt) {
                     }
                     break;
                 }
-                const FlowField *ff = ensure_field(target_cell[i]);
+                const FlowField *ff = ensure_field(target_cell[i], faction[i]);
                 float dx, dy;
                 ff->sample_raw(pos_x[i], pos_y[i], dx, dy);
                 if (dx == 0.0f && dy == 0.0f) {
@@ -694,7 +771,7 @@ void SimWorld::logic_pass(float p_dt) {
                     state[i] = U_GATHER; // 回去继续采
                     break;
                 }
-                const FlowField *ff = ensure_field(drop);
+                const FlowField *ff = ensure_field(drop, faction[i]);
                 float dx, dy;
                 ff->sample_raw(pos_x[i], pos_y[i], dx, dy);
                 if (dx == 0.0f && dy == 0.0f) { // 不可达：就地入库防卡死
@@ -709,6 +786,55 @@ void SimWorld::logic_pass(float p_dt) {
 
             case U_ATTACK: {
                 const int32_t t = attack_target[i];
+                if (t <= -2) { // 建筑目标（编码 -2-index）：攻城
+                    const int b = -2 - t;
+                    if (b >= int(b_cell.size()) || b_hp[b] <= 0.0f) {
+                        attack_target[i] = -1;
+                        if (goal_cell[i] >= 0) { // 障碍已除：恢复原行军目标
+                            state[i] = U_MOVING;
+                            slot_x[i] = float(goal_cell[i] % grid_dim) * CELL_SIZE + CELL_SIZE * 0.5f;
+                            slot_y[i] = float(goal_cell[i] / grid_dim) * CELL_SIZE + CELL_SIZE * 0.5f;
+                        } else {
+                            state[i] = U_IDLE;
+                        }
+                        break;
+                    }
+                    const float half = float(building_footprint(b_type[b])) * CELL_SIZE * 0.5f;
+                    const float bx = float(b_cell[b] % grid_dim) * CELL_SIZE + half;
+                    const float by = float(b_cell[b] / grid_dim) * CELL_SIZE + half;
+                    const float dx = bx - pos_x[i];
+                    const float dy = by - pos_y[i];
+                    const float reach = st.attack_range + UNIT_RADIUS + half;
+                    if (dx * dx + dy * dy <= reach * reach) {
+                        timer[i] -= p_dt;
+                        if (timer[i] <= 0.0f) {
+                            timer[i] = st.attack_interval;
+                            move_streak[i] = 0.0f; // 建筑不吃冲锋加成
+                            b_hp[b] -= st.damage * siege_mult(b_type[b]) * morale_mult(morale[i]) *
+                                    FORM[formation[i]].atk;
+                            attack_events.push_back(i);
+                            attack_events.push_back(-int32_t(b) - 1); // 事件侧沿用 -(index+1)
+                            if (b_hp[b] <= 0.0f) {
+                                destroy_building(b);
+                            }
+                        }
+                        break;
+                    }
+                    // 追墙：远则走流场（目标格被占 → 流场自动落到最近可达格），近则直线
+                    slot_x[i] = bx;
+                    slot_y[i] = by;
+                    const int32_t cell = cell_of_pos(pos_x[i], pos_y[i]);
+                    const int tx = b_cell[b] % grid_dim, ty = b_cell[b] / grid_dim;
+                    if (std::max(std::abs(cell % grid_dim - tx), std::abs(cell / grid_dim - ty)) > 3) {
+                        const FlowField *ff = ensure_field(b_cell[b], faction[i]);
+                        float fdx, fdy;
+                        ff->sample_raw(pos_x[i], pos_y[i], fdx, fdy);
+                        if (fdx != 0.0f || fdy != 0.0f) {
+                            unit_field[i] = ff;
+                        }
+                    }
+                    break;
+                }
                 if (t < 0 || !alive[t]) {
                     attack_target[i] = -1;
                     state[i] = U_IDLE; // 下次扫描重新索敌
@@ -762,7 +888,7 @@ void SimWorld::logic_pass(float p_dt) {
                 slot_x[i] = home_x[i];
                 slot_y[i] = home_y[i];
                 if (std::max(std::abs(ccx - hx), std::abs(ccy - hy)) > 3) {
-                    const FlowField *ff = ensure_field(home);
+                    const FlowField *ff = ensure_field(home, faction[i]);
                     float fdx, fdy;
                     ff->sample_raw(pos_x[i], pos_y[i], fdx, fdy);
                     if (fdx != 0.0f || fdy != 0.0f) {
@@ -982,8 +1108,9 @@ void SimWorld::separate_range(int p_begin, int p_end) {
 void SimWorld::tick(float p_dt) {
     std::memcpy(prev_x.data(), pos_x.data(), pos_x.size() * sizeof(float));
     std::memcpy(prev_y.data(), pos_y.data(), pos_y.size() * sizeof(float));
-    if (field_cache.size() > FIELD_CACHE_MAX) {
+    if (field_cache_dirty || field_cache.size() > FIELD_CACHE_MAX) {
         field_cache.clear(); // tick 开头清理，pass 内指针不会悬空
+        field_cache_dirty = false;
     }
     logic_pass(p_dt);
     pool->run(unit_count, [&](int b, int e) { move_range(b, e, p_dt); });
@@ -1118,6 +1245,14 @@ Vector2i SimWorld::building_cost(int p_type) { // (木材, 石料)
             return Vector2i(30, 20);
         case B_ARCHERY:
             return Vector2i(25, 10);
+        case B_STABLE:
+            return Vector2i(30, 15);
+        case B_TOWER:
+            return Vector2i(20, 30);
+        case B_PALISADE:
+            return Vector2i(5, 0);
+        case B_GATE:
+            return Vector2i(15, 0);
         default: // 营地（初始建筑）
             return Vector2i(0, 0);
     }
@@ -1145,7 +1280,7 @@ int32_t SimWorld::nearest_dropoff(int p_res_type, int32_t p_from_cell) const {
     int32_t best = -1;
     int best_d = INT32_MAX;
     for (size_t b = 0; b < b_cell.size(); b++) {
-        if (!building_accepts(b_type[b], p_res_type)) {
+        if (b_hp[b] <= 0.0f || !building_accepts(b_type[b], p_res_type)) {
             continue;
         }
         const int bx = b_cell[b] % grid_dim, by = b_cell[b] / grid_dim;
@@ -1162,9 +1297,10 @@ int32_t SimWorld::nearest_dropoff(int p_res_type, int32_t p_from_cell) const {
 }
 
 void SimWorld::mark_occupancy(int p_b_index, uint8_t p_value) {
+    const int fp = building_footprint(b_type[p_b_index]);
     const int bx = b_cell[p_b_index] % grid_dim, by = b_cell[p_b_index] / grid_dim;
-    for (int oy = 0; oy < 2; oy++) {
-        for (int ox = 0; ox < 2; ox++) {
+    for (int oy = 0; oy < fp; oy++) {
+        for (int ox = 0; ox < fp; ox++) {
             const int nx = bx + ox, ny = by + oy;
             if (nx >= 0 && nx < grid_dim && ny >= 0 && ny < grid_dim) {
                 occupied[size_t(ny) * grid_dim + nx] = p_value;
@@ -1177,13 +1313,14 @@ bool SimWorld::can_place_building(int p_type, Vector2 p_world_pos) const {
     if (map.is_null() || p_type < 0 || p_type >= B_COUNT) {
         return false;
     }
+    const int fp = building_footprint(p_type);
     const int32_t anchor = cell_of_pos(p_world_pos.x, p_world_pos.y);
     const int bx = anchor % grid_dim, by = anchor / grid_dim;
-    if (bx + 1 >= grid_dim || by + 1 >= grid_dim) {
+    if (bx + fp - 1 >= grid_dim || by + fp - 1 >= grid_dim) {
         return false;
     }
-    for (int oy = 0; oy < 2; oy++) {
-        for (int ox = 0; ox < 2; ox++) {
+    for (int oy = 0; oy < fp; oy++) {
+        for (int ox = 0; ox < fp; ox++) {
             if (!map->is_passable(bx + ox, by + oy) ||
                     occupied[size_t(by + oy) * grid_dim + bx + ox]) {
                 return false;
@@ -1205,13 +1342,52 @@ bool SimWorld::place_building(int p_type, Vector2 p_world_pos) {
     b_cell.push_back(cell_of_pos(p_world_pos.x, p_world_pos.y));
     b_hp.push_back(building_max_hp(uint8_t(p_type)));
     b_timer.push_back(0.0f);
+    b_state.push_back(p_type == B_GATE ? 1 : 0); // 新门默认开（己方先能通行）
     mark_occupancy(int(b_cell.size()) - 1, 1);
-    field_cache.clear(); // 占地变化，全部流场失效
+    field_cache.clear(); // 占地变化，全部流场失效（tick 间调用，无悬空指针）
     return true;
 }
 
 float SimWorld::get_building_hp(int p_index) const {
     return (p_index >= 0 && p_index < int(b_hp.size())) ? b_hp[p_index] : 0.0f;
+}
+
+int SimWorld::get_building_state(int p_index) const {
+    return (p_index >= 0 && p_index < int(b_state.size())) ? b_state[p_index] : 0;
+}
+
+bool SimWorld::toggle_gate_at(Vector2 p_world_pos) {
+    const int32_t cell = cell_of_pos(p_world_pos.x, p_world_pos.y);
+    const int cx = cell % grid_dim, cy = cell / grid_dim;
+    for (size_t b = 0; b < b_cell.size(); b++) {
+        if (b_type[b] != B_GATE || b_hp[b] <= 0.0f) {
+            continue;
+        }
+        const int fp = building_footprint(b_type[b]);
+        const int bx = b_cell[b] % grid_dim, by = b_cell[b] / grid_dim;
+        if (cx >= bx && cx < bx + fp && cy >= by && cy < by + fp) {
+            b_state[b] ^= 1;
+            field_cache_dirty = true; // 通行性变化，玩家侧流场需重算
+            return true;
+        }
+    }
+    return false;
+}
+
+PackedInt32Array SimWorld::take_building_events() {
+    PackedInt32Array out = building_events;
+    building_events.clear();
+    return out;
+}
+
+void SimWorld::debug_damage_building(int p_index, float p_damage) {
+    if (p_index < 0 || p_index >= int(b_hp.size()) || b_hp[p_index] <= 0.0f) {
+        return;
+    }
+    b_hp[p_index] -= p_damage;
+    if (b_hp[p_index] <= 0.0f) {
+        destroy_building(p_index);
+    }
 }
 
 PackedInt32Array SimWorld::get_buildings() const {
@@ -1227,7 +1403,7 @@ PackedInt32Array SimWorld::get_buildings() const {
 // 存档格式 v2：+ 状态机数组 + 库存 + 存储点。
 // 数据布局变更必须升版本号；golden 基线随逻辑变更重置（删 golden_hash.txt 重新初始化）。
 static constexpr uint32_t SAVE_MAGIC = 0x57564943; // "CIVW" LE
-static constexpr uint32_t SAVE_VERSION = 7; // v7: + 冲锋动量/建筑HP/塔冷却
+static constexpr uint32_t SAVE_VERSION = 8; // v8: + 建筑 b_state（门开关/摧毁语义靠 hp）
 
 template <typename T>
 static void blob_write(PackedByteArray &r_out, const T *p_data, size_t p_count) {
@@ -1288,6 +1464,7 @@ PackedByteArray SimWorld::save_state() const {
     blob_write(out, b_cell.data(), b_cell.size());
     blob_write(out, b_hp.data(), b_hp.size());
     blob_write(out, b_timer.data(), b_timer.size());
+    blob_write(out, b_state.data(), b_state.size());
     return out;
 }
 
@@ -1346,14 +1523,18 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
     b_cell.resize(n_buildings);
     b_hp.resize(n_buildings);
     b_timer.resize(n_buildings);
+    b_state.resize(n_buildings);
     if (!blob_read(p_data, at, b_type.data(), b_type.size()) ||
             !blob_read(p_data, at, b_cell.data(), b_cell.size()) ||
             !blob_read(p_data, at, b_hp.data(), b_hp.size()) ||
-            !blob_read(p_data, at, b_timer.data(), b_timer.size())) {
+            !blob_read(p_data, at, b_timer.data(), b_timer.size()) ||
+            !blob_read(p_data, at, b_state.data(), b_state.size())) {
         return false;
     }
-    for (int b = 0; b < n_buildings; b++) { // 重建占地位图
-        mark_occupancy(b, 1);
+    for (int b = 0; b < n_buildings; b++) { // 重建占地位图（废墟不占地）
+        if (b_hp[b] > 0.0f) {
+            mark_occupancy(b, 1);
+        }
     }
     std::memcpy(prev_x.data(), pos_x.data(), pos_x.size() * sizeof(float));
     std::memcpy(prev_y.data(), pos_y.data(), pos_y.size() * sizeof(float));
@@ -1382,6 +1563,7 @@ int64_t SimWorld::state_hash() const {
     mix_bytes(b_hp.data(), b_hp.size() * 4);
     mix_bytes(b_type.data(), b_type.size());
     mix_bytes(b_cell.data(), b_cell.size() * 4);
+    mix_bytes(b_state.data(), b_state.size());
     return int64_t(h);
 }
 
@@ -1405,6 +1587,11 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_unit_formation", "id"), &SimWorld::get_unit_formation);
     ClassDB::bind_method(D_METHOD("debug_add_resources", "wood", "stone", "food"), &SimWorld::debug_add_resources);
     ClassDB::bind_method(D_METHOD("get_building_hp", "index"), &SimWorld::get_building_hp);
+    ClassDB::bind_method(D_METHOD("get_building_state", "index"), &SimWorld::get_building_state);
+    ClassDB::bind_method(D_METHOD("toggle_gate_at", "world_pos"), &SimWorld::toggle_gate_at);
+    ClassDB::bind_method(D_METHOD("take_building_events"), &SimWorld::take_building_events);
+    ClassDB::bind_method(D_METHOD("debug_damage_building", "index", "damage"), &SimWorld::debug_damage_building);
+    ClassDB::bind_static_method("SimWorld", D_METHOD("building_size", "type"), &SimWorld::building_footprint);
     ClassDB::bind_method(D_METHOD("get_unit_morale", "id"), &SimWorld::get_unit_morale);
     ClassDB::bind_method(D_METHOD("command_move", "ids", "world_pos"), &SimWorld::command_move);
     ClassDB::bind_method(D_METHOD("command_gather", "ids", "world_pos"), &SimWorld::command_gather);

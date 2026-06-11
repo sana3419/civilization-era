@@ -25,6 +25,7 @@ func _init() -> void:
 	_bench_saveload()
 	_bench_gather()
 	_bench_combat()
+	_bench_siege()
 	_bench_golden()
 
 	print("=== done, failures: %d ===" % failures)
@@ -428,6 +429,96 @@ func _run_archer_sim() -> SimWorld:
 	for i in 900:
 		w.tick(0.1)
 	return w
+
+
+# 栅栏环 + 城门围住工人，土匪攻城：破门前圈内无伤亡，破门后涌入歼灭
+func _run_siege_sim() -> Dictionary:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var pc := Vector2i(_find_battlefield(map) / 32.0)
+	w.debug_add_resources(400, 0, 0)
+	var gate_cell := Vector2i(pc.x + 3, pc.y)
+	var placed := 0
+	for oy in range(-3, 4): # 7×7 环，东侧开门
+		for ox in range(-3, 4):
+			if maxi(absi(ox), absi(oy)) != 3:
+				continue
+			var c := pc + Vector2i(ox, oy)
+			var t := 11 if c == gate_cell else 10
+			if w.place_building(t, Vector2(c) * 32.0 + Vector2(1, 1)):
+				placed += 1
+	w.spawn_workers(4, Vector2(pc) * 32.0 + Vector2(16, 16))
+	w.toggle_gate_at(Vector2(gate_cell) * 32.0 + Vector2(16, 16)) # 关门
+	var first := w.spawn_units(2, 6, Vector2(pc) * 32.0 + Vector2(320, 16), 1)
+	w.command_move(PackedInt32Array(range(first, first + 6)), Vector2(pc) * 32.0 + Vector2(16, 16))
+	var engaged := false
+	for i in 600: # 60 秒：土匪应转攻城门（普攻 ×0.2 啃不穿 800HP）
+		w.tick(0.1)
+		var ev := w.take_attack_events()
+		for e in range(1, ev.size(), 2):
+			if ev[e] < 0:
+				engaged = true
+	var pre := w.count_alive(0)
+	var gate_held := false # 600 tick 内门应还没被啃穿
+	var flat := w.get_buildings()
+	for b in range(flat.size() / 2):
+		if flat[b * 2] == 11:
+			gate_held = w.get_building_hp(b) > 0.0
+			w.debug_damage_building(b, 10000.0) # 破门，验证恢复行军 + 涌入
+	for i in 600:
+		w.tick(0.1)
+	return {
+		"hash": w.state_hash(), "placed": placed, "engaged": engaged,
+		"gate_held": gate_held, "pre": pre, "post": w.count_alive(0),
+	}
+
+
+# 城门通行：开门己方可穿行，关门全挡（敌方由攻城测试覆盖）
+func _run_gate_pass_sim(open: bool) -> float:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var pc := Vector2i(_find_battlefield(map) / 32.0)
+	w.debug_add_resources(400, 0, 0)
+	var gate_cell := Vector2i(pc.x + 3, pc.y)
+	for oy in range(-3, 4):
+		for ox in range(-3, 4):
+			if maxi(absi(ox), absi(oy)) != 3:
+				continue
+			var c := pc + Vector2i(ox, oy)
+			w.place_building(11 if c == gate_cell else 10, Vector2(c) * 32.0 + Vector2(1, 1))
+	w.spawn_workers(1, Vector2(pc) * 32.0 + Vector2(16, 16))
+	if not open:
+		w.toggle_gate_at(Vector2(gate_cell) * 32.0 + Vector2(16, 16))
+	var target := Vector2(pc + Vector2i(8, 0)) * 32.0 + Vector2(16, 16)
+	w.command_move(PackedInt32Array([0]), target)
+	for i in 300:
+		w.tick(0.1)
+	return w.get_unit_positions(PackedInt32Array([0]))[0].distance_to(target)
+
+
+func _bench_siege() -> void:
+	var r1 := _run_siege_sim()
+	var r2 := _run_siege_sim()
+	print("siege: ring %d/24 %s | engaged %s | gate held %s | workers %d→%d %s | determinism %s" % [
+		r1["placed"], _check(r1["placed"] == 24, "ring placed"),
+		_check(r1["engaged"], "wall engaged"),
+		_check(r1["gate_held"], "gate held"),
+		r1["pre"], r1["post"],
+		_check(r1["pre"] == 4 and r1["post"] < 4, "breach kills"),
+		_check(r1["hash"] == r2["hash"], "siege determinism"),
+	])
+	var d_open := _run_gate_pass_sim(true)
+	var d_closed := _run_gate_pass_sim(false)
+	print("gate passage: open dist %.0f %s | closed dist %.0f %s" % [
+		d_open, _check(d_open < 48.0, "open passage"),
+		d_closed, _check(d_closed > 96.0, "closed blocked"),
+	])
 
 
 func _bench_golden() -> void:
