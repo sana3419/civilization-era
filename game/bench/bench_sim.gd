@@ -293,7 +293,7 @@ func _bench_combat() -> void:
 		var w := SimWorld.new()
 		w.setup(0, 16384.0, 1, 6)
 		w.set_map(map)
-		var p := Vector2(260, 260) * 32.0
+		var p := _find_battlefield(map)
 		w.spawn_units(1, 3, p - Vector2(60, 0), 0)
 		w.spawn_units(2, 9, p + Vector2(60, 0), 1)
 		for i in 600:
@@ -309,6 +309,60 @@ func _bench_combat() -> void:
 		ws.count_alive(0), ws.count_alive(1),
 		_check(ws.count_alive(1) == 0 and ws.count_alive(0) >= 2, "shield wall defense"),
 	])
+	# 骑兵：4 骑兵冲锋（克步兵 ×1.3 + 冲锋首击 ×1.5）应胜 5 土匪
+	var wc := _run_cavalry_sim()
+	print("cavalry charge 4v5: cavalry %d vs bandit %d | %s" % [
+		wc.count_alive(0), wc.count_alive(1),
+		_check(wc.count_alive(1) == 0 and wc.count_alive(0) >= 2, "cavalry charge"),
+	])
+	# 箭塔：塔射程内 3 土匪应被自动清除
+	var wt := _run_tower_sim()
+	print("tower defense: bandits remaining %d | %s" % [
+		wt.count_alive(1), _check(wt.count_alive(1) == 0, "tower kills"),
+	])
+
+
+func _run_cavalry_sim() -> SimWorld:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var p := _find_battlefield(map)
+	var first := w.spawn_units(4, 4, p - Vector2(120, 0), 0) # 拉开距离起冲，积累动量
+	w.spawn_units(2, 5, p + Vector2(100, 0), 1)
+	w.command_move(PackedInt32Array(range(first, first + 4)), p + Vector2(100, 0))
+	for i in 900:
+		w.tick(0.1)
+	return w
+
+
+func _run_tower_sim() -> SimWorld:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	# 找草地放塔
+	var bc := Vector2i(-1, -1)
+	for cy in range(150, 400):
+		for cx in range(150, 400):
+			var ok := true
+			for oy in range(0, 2):
+				for ox in range(0, 2):
+					if not map.is_passable(cx + ox, cy + oy):
+						ok = false
+			if ok:
+				bc = Vector2i(cx, cy)
+				break
+		if bc.x >= 0:
+			break
+	w.debug_add_resources(100, 100, 0)
+	assert(w.place_building(9, Vector2(bc) * 32.0 + Vector2(1, 1)))
+	w.spawn_units(2, 3, Vector2(bc) * 32.0 + Vector2(150, 32), 1) # 塔射程内
+	for i in 400: # 40 秒
+		w.tick(0.1)
+	return w
 
 
 func _run_shield_sim() -> SimWorld:
@@ -327,13 +381,27 @@ func _run_shield_sim() -> SimWorld:
 	return w
 
 
+# 找一片 9×9 全草地的开阔战场（此前硬编码 (260,260) 其实是深海！）
+func _find_battlefield(map: GameMap) -> Vector2:
+	for cy in range(150, 400):
+		for cx in range(150, 400):
+			var ok := true
+			for oy in range(-4, 5):
+				for ox in range(-4, 5):
+					if map.get_terrain(cx + ox, cy + oy) != 3:
+						ok = false
+			if ok:
+				return Vector2(cx, cy) * 32.0
+	return Vector2(256, 256) * 32.0
+
+
 func _run_archer_sim() -> SimWorld:
 	var map := GameMap.new()
 	map.generate(512, 2026)
 	var w := SimWorld.new()
 	w.setup(0, 16384.0, 1, 6)
 	w.set_map(map)
-	var p := Vector2(260, 260) * 32.0
+	var p := _find_battlefield(map)
 	w.spawn_units(3, 5, p - Vector2(100, 0), 0) # 5 弓手
 	w.spawn_units(2, 5, p + Vector2(100, 0), 1) # 5 土匪
 	for i in 900:

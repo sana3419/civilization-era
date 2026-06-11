@@ -32,7 +32,8 @@ enum UnitType : uint8_t {
     UT_MILITIA = 1, // 民兵
     UT_BANDIT = 2, // 土匪
     UT_ARCHER = 3, // 弓箭手（远程）
-    UT_COUNT = 4,
+    UT_CAVALRY = 4, // 轻骑兵
+    UT_COUNT = 5,
 };
 
 struct UnitStats {
@@ -41,6 +42,8 @@ struct UnitStats {
     float attack_range; // px
     float attack_interval; // 秒
     float aggro_range; // px，0 = 不主动索敌
+    float speed; // px/s
+    float charge; // 冲锋伤害系数（×阵型冲锋系数）
 };
 
 enum Formation : uint8_t {
@@ -65,7 +68,9 @@ enum BuildingType : uint8_t {
     B_STOREHOUSE = 5, // 仓库：万能存储点
     B_BARRACKS = 6, // 兵营：训练民兵
     B_ARCHERY = 7, // 射箭场：训练弓箭手
-    B_COUNT = 8,
+    B_STABLE = 8, // 马厩：训练骑兵
+    B_TOWER = 9, // 箭塔：自动攻击范围内敌人
+    B_COUNT = 10,
 };
 
 // 模拟世界：SoA、确定性、串行状态机 + 并行移动/分离。
@@ -106,13 +111,17 @@ class SimWorld : public godot::RefCounted {
     std::vector<float> morale; // 0-100，基线 60
     std::vector<float> home_x, home_y; // 出生点（溃逃目的地）
     std::vector<uint8_t> formation; // F_*
+    std::vector<float> move_streak; // 持续全速移动秒数（冲锋动量）
 
-    // 本帧攻击事件（渲染特效用，瞬态不序列化）：[attacker, target, ...]
+    // 本帧攻击事件（渲染特效用，瞬态不序列化）：
+    // [attacker, target, ...]，attacker < 0 表示建筑 -(index+1)
     godot::PackedInt32Array attack_events;
 
     // 建筑（序列化范围）：2×2 占地，锚点为左上格
     std::vector<uint8_t> b_type;
     std::vector<int32_t> b_cell;
+    std::vector<float> b_hp;
+    std::vector<float> b_timer; // 箭塔射击冷却
 
     int64_t stockpile[RES_COUNT] = { 0, 0, 0 };
     int32_t dropoff_cell = -1;
@@ -157,6 +166,7 @@ public:
     int spawn_workers(int p_count, godot::Vector2 p_world_pos);
     int spawn_units(int p_type, int p_count, godot::Vector2 p_world_pos, int p_faction);
     bool try_spend(int p_wood, int p_stone, int p_food); // 资源足够则扣除
+    void debug_add_resources(int p_wood, int p_stone, int p_food); // 测试/作弊
     void command_move(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_gather(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_attack(const godot::PackedInt32Array &p_ids, int p_target_id);
@@ -167,6 +177,7 @@ public:
     bool can_place_building(int p_type, godot::Vector2 p_world_pos) const;
     bool place_building(int p_type, godot::Vector2 p_world_pos);
     godot::PackedInt32Array get_buildings() const; // 扁平 [type, cell, ...]
+    float get_building_hp(int p_index) const;
     static godot::Vector2i building_cost(int p_type); // (木材, 石料)
 
     godot::PackedInt32Array get_units_in_rect(godot::Vector2 p_min, godot::Vector2 p_max) const;

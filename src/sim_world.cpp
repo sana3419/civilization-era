@@ -22,12 +22,30 @@ static inline float rand01(uint32_t &s) {
 }
 
 // 单位属性表（设计文档数值；攻击距离为中心距，近战 = 范围 + 双方半径）
+// 字段：hp, 伤害, 射程, 攻速, 仇恨, 移速, 冲锋系数
 static constexpr UnitStats STATS[UT_COUNT] = {
-    { 100.0f, 2.0f, 20.0f, 1.0f, 0.0f }, // 工人：不主动索敌
-    { 60.0f, 8.0f, 20.0f, 1.0f, 160.0f }, // 民兵
-    { 60.0f, 8.0f, 20.0f, 1.0f, 160.0f }, // 土匪
-    { 50.0f, 10.0f, 200.0f, 1.5f, 220.0f }, // 弓箭手：远程
+    { 100.0f, 2.0f, 20.0f, 1.0f, 0.0f, 60.0f, 1.0f }, // 工人
+    { 60.0f, 8.0f, 20.0f, 1.0f, 160.0f, 60.0f, 1.1f }, // 民兵
+    { 60.0f, 8.0f, 20.0f, 1.0f, 160.0f, 60.0f, 1.1f }, // 土匪
+    { 50.0f, 10.0f, 200.0f, 1.5f, 220.0f, 60.0f, 1.0f }, // 弓箭手
+    { 80.0f, 15.0f, 22.0f, 1.0f, 180.0f, 110.0f, 1.5f }, // 轻骑兵
 };
+
+// 箭塔参数
+static constexpr float TOWER_RANGE = 240.0f;
+static constexpr float TOWER_DAMAGE = 12.0f;
+static constexpr float TOWER_INTERVAL = 1.5f;
+
+static float building_max_hp(uint8_t p_type) {
+    switch (p_type) {
+        case B_TOWER:
+            return 400.0f;
+        case B_CAMP:
+            return 800.0f;
+        default:
+            return 300.0f;
+    }
+}
 
 // 士气 → 战斗力修正（设计文档士气等级表）
 static inline float morale_mult(float p_m) {
@@ -51,26 +69,27 @@ static inline float morale_mult(float p_m) {
 
 // 阵型系数表（设计文档：攻/防/速；冲锋系数留待冲锋机制）
 struct FormationMod {
-    float atk, def, speed;
+    float atk, def, speed, charge;
 };
 static constexpr FormationMod FORM[F_COUNT] = {
-    { 1.0f, 1.0f, 1.0f }, // 无
-    { 1.0f, 0.9f, 1.0f }, // 横线
-    { 0.8f, 0.8f, 1.2f }, // 纵队
-    { 0.9f, 1.1f, 0.9f }, // 方阵
-    { 1.1f, 0.8f, 1.1f }, // 锥形
-    { 0.7f, 1.5f, 0.5f }, // 盾墙
-    { 0.8f, 1.3f, 0.3f }, // 圆阵
-    { 1.1f, 0.7f, 1.1f }, // 散兵线
-    { 1.0f, 0.9f, 0.9f }, // 新月
+    { 1.0f, 1.0f, 1.0f, 1.0f }, // 无
+    { 1.0f, 0.9f, 1.0f, 0.8f }, // 横线
+    { 0.8f, 0.8f, 1.2f, 1.0f }, // 纵队
+    { 0.9f, 1.1f, 0.9f, 0.7f }, // 方阵
+    { 1.1f, 0.8f, 1.1f, 1.5f }, // 锥形
+    { 0.7f, 1.5f, 0.5f, 0.3f }, // 盾墙
+    { 0.8f, 1.3f, 0.3f, 0.1f }, // 圆阵
+    { 1.1f, 0.7f, 1.1f, 0.9f }, // 散兵线
+    { 1.0f, 0.9f, 0.9f, 1.1f }, // 新月
 };
 
-// 兵种克制系数 [攻击方][防守方]（设计文档克制表：轻步兵→弓兵 ×1.2，弓兵→轻步兵 ×1.1）
+// 兵种克制系数 [攻击方][防守方]（设计文档克制表）
 static constexpr float COUNTER[UT_COUNT][UT_COUNT] = {
-    { 1.0f, 1.0f, 1.0f, 1.0f }, // 工人
-    { 1.0f, 1.0f, 1.0f, 1.2f }, // 民兵
-    { 1.0f, 1.0f, 1.0f, 1.2f }, // 土匪
-    { 1.1f, 1.1f, 1.1f, 1.0f }, // 弓手
+    { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f }, // 工人
+    { 1.0f, 1.0f, 1.0f, 1.2f, 0.8f }, // 民兵（轻步兵惧骑兵）
+    { 1.0f, 1.0f, 1.0f, 1.2f, 0.8f }, // 土匪
+    { 1.1f, 1.1f, 1.1f, 1.0f, 0.9f }, // 弓手
+    { 1.3f, 1.3f, 1.3f, 1.4f, 1.0f }, // 轻骑兵（克步兵/弓手）
 };
 
 void SimWorld::resize_arrays(int p_count) {
@@ -98,6 +117,7 @@ void SimWorld::resize_arrays(int p_count) {
     home_x.resize(p_count, 0.0f);
     home_y.resize(p_count, 0.0f);
     formation.resize(p_count, F_NONE);
+    move_streak.resize(p_count, 0.0f);
 
     new_x.resize(p_count);
     new_y.resize(p_count);
@@ -126,6 +146,8 @@ void SimWorld::setup(int p_count, float p_world_size, int p_seed, int p_threads)
     dropoff_cell = -1;
     b_type.clear();
     b_cell.clear();
+    b_hp.clear();
+    b_timer.clear();
     field_cache.clear();
 
     // 压测模式出生：中心 1/4 区域随机（rng 采样顺序不可变，golden 依赖）
@@ -206,10 +228,18 @@ int SimWorld::spawn_units(int p_type, int p_count, Vector2 p_world_pos, int p_fa
         morale[i] = 60.0f;
         home_x[i] = p_world_pos.x;
         home_y[i] = p_world_pos.y;
+        formation[i] = F_NONE;
+        move_streak[i] = 0.0f;
         prev_x[i] = pos_x[i];
         prev_y[i] = pos_y[i];
     }
     return first;
+}
+
+void SimWorld::debug_add_resources(int p_wood, int p_stone, int p_food) {
+    stockpile[RES_WOOD] += p_wood;
+    stockpile[RES_STONE] += p_stone;
+    stockpile[RES_FOOD] += p_food;
 }
 
 void SimWorld::command_attack(const PackedInt32Array &p_ids, int p_target_id) {
@@ -689,8 +719,13 @@ void SimWorld::logic_pass(float p_dt) {
                     timer[i] -= p_dt;
                     if (timer[i] <= 0.0f) {
                         timer[i] = st.attack_interval;
-                        hp[t] -= st.damage * COUNTER[u_type[i]][u_type[t]] * morale_mult(morale[i]) *
+                        float dmg = st.damage * COUNTER[u_type[i]][u_type[t]] * morale_mult(morale[i]) *
                                 FORM[formation[i]].atk / FORM[formation[t]].def;
+                        if (move_streak[i] > 1.0f) { // 冲锋首击：动量转伤害
+                            dmg *= st.charge * FORM[formation[i]].charge;
+                        }
+                        move_streak[i] = 0.0f;
+                        hp[t] -= dmg;
                         attack_events.push_back(i);
                         attack_events.push_back(t);
                         if (hp[t] <= 0.0f) {
@@ -733,6 +768,54 @@ void SimWorld::logic_pass(float p_dt) {
                     }
                 }
                 break;
+            }
+        }
+    }
+
+    // 箭塔自动攻击（玩家建筑，打 faction != 0）
+    for (size_t b = 0; b < b_cell.size(); b++) {
+        if (b_type[b] != B_TOWER || b_hp[b] <= 0.0f) {
+            continue;
+        }
+        b_timer[b] -= p_dt;
+        if (b_timer[b] > 0.0f) {
+            continue;
+        }
+        const float tx = float(b_cell[b] % grid_dim) * CELL_SIZE + CELL_SIZE;
+        const float ty = float(b_cell[b] / grid_dim) * CELL_SIZE + CELL_SIZE;
+        // 网格内找最近敌人
+        int32_t best = -1;
+        float best_d2 = TOWER_RANGE * TOWER_RANGE;
+        const int cr = int(TOWER_RANGE / CELL_SIZE) + 1;
+        const int cx = std::clamp(int(tx / CELL_SIZE), 0, grid_dim - 1);
+        const int cy = std::clamp(int(ty / CELL_SIZE), 0, grid_dim - 1);
+        for (int gy = std::max(0, cy - cr); gy <= std::min(grid_dim - 1, cy + cr); gy++) {
+            for (int gx = std::max(0, cx - cr); gx <= std::min(grid_dim - 1, cx + cr); gx++) {
+                const uint32_t cell = uint32_t(gy) * grid_dim + gx;
+                for (uint32_t e = cell_starts[cell]; e < cell_starts[cell + 1]; e++) {
+                    const int32_t j = int32_t(cell_entries[e]);
+                    if (!alive[j] || faction[j] == 0) {
+                        continue;
+                    }
+                    const float ddx = pos_x[j] - tx;
+                    const float ddy = pos_y[j] - ty;
+                    const float d2 = ddx * ddx + ddy * ddy;
+                    if (d2 < best_d2) {
+                        best_d2 = d2;
+                        best = j;
+                    }
+                }
+            }
+        }
+        if (best >= 0) {
+            b_timer[b] = TOWER_INTERVAL;
+            hp[best] -= TOWER_DAMAGE;
+            attack_events.push_back(-int32_t(b) - 1);
+            attack_events.push_back(best);
+            if (hp[best] <= 0.0f) {
+                hp[best] = 0.0f;
+                alive[best] = 0;
+                on_unit_killed(best);
             }
         }
     }
@@ -799,14 +882,21 @@ void SimWorld::move_range(int p_begin, int p_end, float p_dt) {
         if (map.is_valid()) {
             const int32_t c = cell_of_pos(pos_x[i], pos_y[i]);
             const int mc = GameMap::terrain_move_cost(map->terrain_at(c % grid_dim, c / grid_dim));
-            if (mc > 0) {
-                mult *= 10.0f / float(mc);
-            }
+            // 不可通行地形（被直线追击/推挤挤进去时）重罚，正式地形碰撞后续做
+            mult *= (mc > 0) ? 10.0f / float(mc) : 0.25f;
         }
-        vel_x[i] = dx * UNIT_SPEED * mult;
-        vel_y[i] = dy * UNIT_SPEED * mult;
+        const float spd = STATS[u_type[i]].speed;
+        vel_x[i] = dx * spd * mult;
+        vel_y[i] = dy * spd * mult;
         pos_x[i] += vel_x[i] * p_dt;
         pos_y[i] += vel_y[i] * p_dt;
+        // 冲锋动量：持续接近全速移动累积，停顿清零
+        const float v2 = vel_x[i] * vel_x[i] + vel_y[i] * vel_y[i];
+        if (v2 > 0.25f * spd * spd) {
+            move_streak[i] += p_dt;
+        } else {
+            move_streak[i] = 0.0f;
+        }
     }
 }
 
@@ -1111,9 +1201,15 @@ bool SimWorld::place_building(int p_type, Vector2 p_world_pos) {
     stockpile[RES_STONE] -= cost.y;
     b_type.push_back(uint8_t(p_type));
     b_cell.push_back(cell_of_pos(p_world_pos.x, p_world_pos.y));
+    b_hp.push_back(building_max_hp(uint8_t(p_type)));
+    b_timer.push_back(0.0f);
     mark_occupancy(int(b_cell.size()) - 1, 1);
     field_cache.clear(); // 占地变化，全部流场失效
     return true;
+}
+
+float SimWorld::get_building_hp(int p_index) const {
+    return (p_index >= 0 && p_index < int(b_hp.size())) ? b_hp[p_index] : 0.0f;
 }
 
 PackedInt32Array SimWorld::get_buildings() const {
@@ -1129,7 +1225,7 @@ PackedInt32Array SimWorld::get_buildings() const {
 // 存档格式 v2：+ 状态机数组 + 库存 + 存储点。
 // 数据布局变更必须升版本号；golden 基线随逻辑变更重置（删 golden_hash.txt 重新初始化）。
 static constexpr uint32_t SAVE_MAGIC = 0x57564943; // "CIVW" LE
-static constexpr uint32_t SAVE_VERSION = 6; // v6: + 阵型
+static constexpr uint32_t SAVE_VERSION = 7; // v7: + 冲锋动量/建筑HP/塔冷却
 
 template <typename T>
 static void blob_write(PackedByteArray &r_out, const T *p_data, size_t p_count) {
@@ -1183,10 +1279,13 @@ PackedByteArray SimWorld::save_state() const {
     blob_write(out, home_x.data(), home_x.size());
     blob_write(out, home_y.data(), home_y.size());
     blob_write(out, formation.data(), formation.size());
+    blob_write(out, move_streak.data(), move_streak.size());
     const int32_t n_buildings = int32_t(b_cell.size());
     blob_write(out, &n_buildings, 1);
     blob_write(out, b_type.data(), b_type.size());
     blob_write(out, b_cell.data(), b_cell.size());
+    blob_write(out, b_hp.data(), b_hp.size());
+    blob_write(out, b_timer.data(), b_timer.size());
     return out;
 }
 
@@ -1233,7 +1332,8 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
             !blob_read(p_data, at, morale.data(), morale.size()) ||
             !blob_read(p_data, at, home_x.data(), home_x.size()) ||
             !blob_read(p_data, at, home_y.data(), home_y.size()) ||
-            !blob_read(p_data, at, formation.data(), formation.size())) {
+            !blob_read(p_data, at, formation.data(), formation.size()) ||
+            !blob_read(p_data, at, move_streak.data(), move_streak.size())) {
         return false;
     }
     int32_t n_buildings = 0;
@@ -1242,8 +1342,12 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
     }
     b_type.resize(n_buildings);
     b_cell.resize(n_buildings);
+    b_hp.resize(n_buildings);
+    b_timer.resize(n_buildings);
     if (!blob_read(p_data, at, b_type.data(), b_type.size()) ||
-            !blob_read(p_data, at, b_cell.data(), b_cell.size())) {
+            !blob_read(p_data, at, b_cell.data(), b_cell.size()) ||
+            !blob_read(p_data, at, b_hp.data(), b_hp.size()) ||
+            !blob_read(p_data, at, b_timer.data(), b_timer.size())) {
         return false;
     }
     for (int b = 0; b < n_buildings; b++) { // 重建占地位图
@@ -1273,6 +1377,7 @@ int64_t SimWorld::state_hash() const {
     mix_bytes(alive.data(), alive.size());
     mix_bytes(morale.data(), morale.size() * 4);
     mix_bytes(formation.data(), formation.size());
+    mix_bytes(b_hp.data(), b_hp.size() * 4);
     mix_bytes(b_type.data(), b_type.size());
     mix_bytes(b_cell.data(), b_cell.size() * 4);
     return int64_t(h);
@@ -1296,6 +1401,8 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("count_state", "state", "faction"), &SimWorld::count_state);
     ClassDB::bind_method(D_METHOD("command_set_formation", "ids", "formation"), &SimWorld::command_set_formation);
     ClassDB::bind_method(D_METHOD("get_unit_formation", "id"), &SimWorld::get_unit_formation);
+    ClassDB::bind_method(D_METHOD("debug_add_resources", "wood", "stone", "food"), &SimWorld::debug_add_resources);
+    ClassDB::bind_method(D_METHOD("get_building_hp", "index"), &SimWorld::get_building_hp);
     ClassDB::bind_method(D_METHOD("get_unit_morale", "id"), &SimWorld::get_unit_morale);
     ClassDB::bind_method(D_METHOD("command_move", "ids", "world_pos"), &SimWorld::command_move);
     ClassDB::bind_method(D_METHOD("command_gather", "ids", "world_pos"), &SimWorld::command_gather);

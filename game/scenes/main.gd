@@ -25,13 +25,17 @@ const BUILDINGS := [
 	{ "name": "仓库", "color": Color("7a5a8a") },
 	{ "name": "兵营", "color": Color("8a3a3a") },
 	{ "name": "射箭场", "color": Color("3a6a5a") },
+	{ "name": "马厩", "color": Color("7a5a30") },
+	{ "name": "箭塔", "color": Color("4a4a58") },
 ]
 # 训练表：单位类型 → 所需建筑/成本（与 src/sim_world.h 对应）
 const TRAIN := [
 	{ "type": 1, "name": "民兵", "building": 6, "wood": 10, "food": 20 },
 	{ "type": 3, "name": "弓手", "building": 7, "wood": 15, "food": 15 },
+	{ "type": 4, "name": "骑兵", "building": 8, "wood": 30, "food": 30 },
 ]
-const UNIT_MAX_HP := [100.0, 60.0, 60.0, 50.0] # 与 src/sim_world.h STATS 对应
+const UNIT_MAX_HP := [100.0, 60.0, 60.0, 50.0, 80.0] # 与 src/sim_world.h STATS 对应
+const RAID_INTERVAL := 90.0 # 土匪袭扰间隔（模拟秒）
 const FORMATION_NAMES := ["无阵型", "横线阵", "纵队", "方阵", "锥形阵", "盾墙", "圆阵", "散兵线", "新月阵"]
 
 var map: GameMap
@@ -52,6 +56,7 @@ var minimap_base: ImageTexture
 var place_mode := -1 # 建造放置模式：建筑类型，-1 = 关闭
 var bandit_pos := Vector2.ZERO
 var attack_fx := [] # [{from, to, ttl}]
+var raid_timer := RAID_INTERVAL
 var ghost := ColorRect.new()
 var shot_timer := 0.0
 
@@ -207,17 +212,19 @@ func _sync_unit_mesh() -> void:
 
 
 func _make_unit_atlas() -> ImageTexture:
-	# 4 行 × 6 帧：工人（蓝）/ 民兵（银甲红缨）/ 土匪（暗红）/ 弓手（绿帽）
+	# 5 行 × 6 帧：工人（蓝）/ 民兵（银甲红缨）/ 土匪（暗红）/ 弓手（绿帽）/ 骑兵（棕鬃）
 	var body := [
 		Color(0.25, 0.45, 0.9), Color(0.7, 0.7, 0.78),
 		Color(0.55, 0.15, 0.15), Color(0.5, 0.65, 0.35),
+		Color(0.6, 0.42, 0.2),
 	]
 	var head := [
 		Color(0.95, 0.8, 0.6), Color(0.85, 0.2, 0.2),
 		Color(0.3, 0.25, 0.2), Color(0.2, 0.5, 0.25),
+		Color(0.35, 0.22, 0.1),
 	]
-	var img := Image.create(16 * 6, 16 * 4, false, Image.FORMAT_RGBA8)
-	for row in 4:
+	var img := Image.create(16 * 6, 16 * 5, false, Image.FORMAT_RGBA8)
+	for row in 5:
 		for f in 6:
 			var c: Color = body[row].lightened(0.06 * (f % 3))
 			img.fill_rect(Rect2i(f * 16 + 3, row * 16 + 3, 10, 10), c)
@@ -239,7 +246,7 @@ void vertex() {
 void fragment() {
 	float frame = floor(inst_custom.x);
 	float row = floor(inst_custom.z); // 单位类型 → 图集行
-	vec2 uv = vec2((UV.x + frame) / 6.0, (UV.y + row) / 4.0);
+	vec2 uv = vec2((UV.x + frame) / 6.0, (UV.y + row) / 5.0);
 	COLOR = texture(TEXTURE, uv);
 	if (inst_custom.y > 0.0) {
 		COLOR.rgb = mix(COLOR.rgb, vec3(1.0, 0.85, 0.2), 0.45);
@@ -382,16 +389,32 @@ func _process(delta: float) -> void:
 	while sim_accum >= step:
 		sim_accum -= step
 		sim.tick(step)
+		# 土匪袭扰：定期从匪营出兵压向玩家营地
+		raid_timer -= step
+		if raid_timer <= 0.0 and bandit_pos != Vector2.ZERO:
+			raid_timer = RAID_INTERVAL
+			var first: int = sim.spawn_units(2, 3, bandit_pos, 1)
+			sim.command_move(PackedInt32Array(range(first, first + 3)), camp_pos)
+			_sync_unit_mesh()
+			info_label.text = "⚔ 土匪来袭！"
 
 	sim.write_render_buffer(sim_accum / step) # 插值系数
 	if unit_mm.instance_count > 0:
 		RenderingServer.multimesh_set_buffer(unit_mm.get_rid(), sim.get_render_buffer())
 
-	# 攻击特效：取本帧事件画箭线/挥击线，0.25 秒淡出
+	# 攻击特效：取本帧事件画箭线/挥击线，0.25 秒淡出；attacker < 0 为箭塔
 	var events := sim.take_attack_events()
+	var flat_b := sim.get_buildings()
 	for e in range(0, events.size(), 2):
-		var pair := sim.get_unit_positions(PackedInt32Array([events[e], events[e + 1]]))
-		attack_fx.append({ "from": pair[0], "to": pair[1], "ttl": 0.25 })
+		var from_pos: Vector2
+		if events[e] < 0:
+			var bi := -events[e] - 1
+			var bcell := flat_b[bi * 2 + 1]
+			from_pos = Vector2(bcell % MAP_DIM, bcell / MAP_DIM) * TILE + Vector2(TILE, TILE)
+		else:
+			from_pos = sim.get_unit_positions(PackedInt32Array([events[e]]))[0]
+		var to_pos := sim.get_unit_positions(PackedInt32Array([events[e + 1]]))[0]
+		attack_fx.append({ "from": from_pos, "to": to_pos, "ttl": 0.25 })
 	for fx in attack_fx:
 		fx["ttl"] -= delta
 	attack_fx = attack_fx.filter(func(fx): return fx["ttl"] > 0.0)
