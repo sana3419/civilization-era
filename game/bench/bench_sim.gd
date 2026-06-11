@@ -26,6 +26,7 @@ func _init() -> void:
 	_bench_gather()
 	_bench_combat()
 	_bench_siege()
+	_bench_siege_engines()
 	_bench_golden()
 
 	print("=== done, failures: %d ===" % failures)
@@ -518,6 +519,113 @@ func _bench_siege() -> void:
 	print("gate passage: open dist %.0f %s | closed dist %.0f %s" % [
 		d_open, _check(d_open < 48.0, "open passage"),
 		d_closed, _check(d_closed > 96.0, "closed blocked"),
+	])
+
+
+# 攻城槌带队破石门（×3.0），破门后土匪涌入
+func _run_ram_sim() -> Dictionary:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var pc := Vector2i(_find_battlefield(map) / 32.0)
+	w.debug_add_resources(100, 400, 0)
+	var gate_cell := Vector2i(pc.x + 3, pc.y)
+	for oy in range(-3, 4): # 7×7 石墙环，东侧石门
+		for ox in range(-3, 4):
+			if maxi(absi(ox), absi(oy)) != 3:
+				continue
+			var c := pc + Vector2i(ox, oy)
+			w.place_building(14 if c == gate_cell else 13, Vector2(c) * 32.0 + Vector2(1, 1))
+	w.spawn_workers(4, Vector2(pc) * 32.0 + Vector2(16, 16))
+	w.toggle_gate_at(Vector2(gate_cell) * 32.0 + Vector2(16, 16)) # 关门
+	var first := w.spawn_units(2, 4, Vector2(pc) * 32.0 + Vector2(320, 16), 1)
+	var ram := w.spawn_units(6, 1, Vector2(pc) * 32.0 + Vector2(380, 16), 1)
+	var ids := PackedInt32Array(range(first, first + 4))
+	ids.append(ram)
+	w.command_move(ids, Vector2(pc) * 32.0 + Vector2(16, 16))
+	var breach_tick := -1
+	for i in 1100: # 槌 45dps + 4 匪 6.4dps → 3000HP 约 60s + 行军
+		w.tick(0.1)
+		if breach_tick < 0 and w.take_building_events().size() > 0:
+			breach_tick = i
+			if w.count_alive(0) < 4: # 破门前圈内必须无伤亡
+				breach_tick = -2
+	return {
+		"hash": w.state_hash(), "breach": breach_tick,
+		"post": w.count_alive(0), "ram_alive": w.is_unit_alive(ram),
+	}
+
+
+# 弓手登石墙：墙上射程 +2 格、防御 ×5，顶住贴脸土匪
+func _run_garrison_sim() -> Dictionary:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var pc := Vector2i(_find_battlefield(map) / 32.0)
+	w.debug_add_resources(0, 100, 0)
+	for oy in range(-2, 3): # 南北向 5 段石墙
+		w.place_building(13, Vector2(pc + Vector2i(0, oy)) * 32.0 + Vector2(1, 1))
+	var archer := w.spawn_units(3, 1, Vector2(pc) * 32.0 + Vector2(-48, 16), 0)
+	var ok := w.command_garrison(PackedInt32Array([archer]),
+			Vector2(pc) * 32.0 + Vector2(16, 16))
+	for i in 100:
+		w.tick(0.1)
+	var garrisoned := w.get_unit_state(archer) == 7 # U_GARRISON
+	var bandit := w.spawn_units(2, 1, Vector2(pc) * 32.0 + Vector2(300, 16), 1)
+	w.command_move(PackedInt32Array([bandit]), Vector2(pc) * 32.0 + Vector2(64, 16))
+	for i in 400:
+		w.tick(0.1)
+	return {
+		"ok": ok, "garrisoned": garrisoned,
+		"bandit_dead": not w.is_unit_alive(bandit),
+		"archer_hp": w.get_unit_hp(archer),
+		"still_garrisoned": w.get_unit_state(archer) == 7,
+	}
+
+
+# 投石车 10 格外站桩拆栅栏（×2.0 普通建筑列对墙是 ×1.5）
+func _run_catapult_sim() -> Dictionary:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var pc := Vector2i(_find_battlefield(map) / 32.0)
+	w.debug_add_resources(50, 0, 0)
+	w.place_building(10, Vector2(pc + Vector2i(4, 0)) * 32.0 + Vector2(1, 1))
+	var cata := w.spawn_units(7, 1, Vector2(pc + Vector2i(-4, 0)) * 32.0 + Vector2(16, 16), 0)
+	var start: Vector2 = w.get_unit_positions(PackedInt32Array([cata]))[0]
+	w.command_attack_building(PackedInt32Array([cata]), 0)
+	for i in 450: # 40×1.5/4s = 15dps → 500HP 约 34s
+		w.tick(0.1)
+	var moved: float = w.get_unit_positions(PackedInt32Array([cata]))[0].distance_to(start)
+	return { "destroyed": w.get_building_hp(0) <= 0.0, "moved": moved }
+
+
+func _bench_siege_engines() -> void:
+	var r1 := _run_ram_sim()
+	var r2 := _run_ram_sim()
+	print("ram: breach@%d %s | post-breach workers %d %s | ram alive %s | determinism %s" % [
+		r1["breach"], _check(r1["breach"] >= 0, "ram breached clean"),
+		r1["post"], _check(r1["post"] < 4, "breach kills"),
+		_check(r1["ram_alive"], "ram survives"),
+		_check(r1["hash"] == r2["hash"], "ram determinism"),
+	])
+	var g := _run_garrison_sim()
+	print("garrison: cmd %s | mounted %s | bandit dead %s | archer hp %.0f %s | held %s" % [
+		_check(g["ok"], "garrison cmd"), _check(g["garrisoned"], "mounted"),
+		_check(g["bandit_dead"], "bandit dead"),
+		g["archer_hp"], _check(g["archer_hp"] > 25.0, "wall bonus"),
+		_check(g["still_garrisoned"], "held wall"),
+	])
+	var c := _run_catapult_sim()
+	print("catapult: wall destroyed %s | stand-off moved %.0fpx %s" % [
+		_check(c["destroyed"], "catapult kill"),
+		c["moved"], _check(c["moved"] < 24.0, "stand-off"),
 	])
 
 

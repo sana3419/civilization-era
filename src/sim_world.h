@@ -25,6 +25,7 @@ enum UnitState : uint8_t {
     U_RETURN = 4, // 满载运回最近有效存储点
     U_ATTACK = 5, // 追击 attack_target 并近战
     U_FLEE = 6, // 士气崩溃，逃向出生点，恢复后转 IDLE
+    U_GARRISON = 7, // 驻守石墙顶（防御×5、射程+2格），不移动
 };
 
 enum UnitType : uint8_t {
@@ -34,7 +35,9 @@ enum UnitType : uint8_t {
     UT_ARCHER = 3, // 弓箭手（远程）
     UT_CAVALRY = 4, // 轻骑兵
     UT_SPEARMAN = 5, // 长枪兵（反骑兵）
-    UT_COUNT = 6,
+    UT_RAM = 6, // 攻城槌：只攻建筑（城门×3.0），无士气/索敌
+    UT_CATAPULT = 7, // 投石车：远程只攻建筑（城墙×1.5）
+    UT_COUNT = 8,
 };
 
 struct UnitStats {
@@ -73,7 +76,10 @@ enum BuildingType : uint8_t {
     B_TOWER = 9, // 箭塔：自动攻击范围内敌人
     B_PALISADE = 10, // 木栅栏：1×1 线性障碍
     B_GATE = 11, // 木门：1×1 可开关；开 = 己方通行，敌方永远阻挡（需破坏）
-    B_COUNT = 12,
+    B_SWORKSHOP = 12, // 攻城工坊：制造攻城槌/投石车
+    B_STONE_WALL = 13, // 石墙：1×1，可驻军 1 单位（墙上状态）
+    B_STONE_GATE = 14, // 石门：1×1 可开关，同木门规则
+    B_COUNT = 15,
 };
 
 // 模拟世界：SoA、确定性、串行状态机 + 并行移动/分离。
@@ -135,6 +141,7 @@ class SimWorld : public godot::RefCounted {
     std::vector<float> new_x, new_y;
     std::vector<float> prev_x, prev_y; // 渲染插值
     std::vector<uint8_t> occupied; // 建筑占地位图（由 b_* 重建）
+    std::vector<int32_t> b_garrison; // 各建筑驻军单位 id，-1 = 空（由单位状态重建）
     std::vector<const FlowField *> unit_field; // 本 tick 各单位用的流场
     godot::Ref<GameMap> map;
     // 流场按 (目的格, 阵营) 缓存：城门通行性按阵营区分（开门只放行己方）
@@ -165,6 +172,7 @@ class SimWorld : public godot::RefCounted {
     void on_unit_killed(int p_victim); // 周边士气结算
     int32_t find_nearest_blocking_building(int p_unit) const; // 攻城目标：城门优先，串行调用
     void destroy_building(int p_b);
+    void release_garrison(int p_unit); // 离墙：清驻军占位（换命令/死亡/溃逃时调用）
 
 public:
     void setup(int p_count, float p_world_size, int p_seed, int p_threads);
@@ -179,6 +187,8 @@ public:
     void command_move(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_gather(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_attack(const godot::PackedInt32Array &p_ids, int p_target_id);
+    void command_attack_building(const godot::PackedInt32Array &p_ids, int p_building);
+    bool command_garrison(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_set_formation(const godot::PackedInt32Array &p_ids, int p_formation);
     int get_unit_formation(int p_id) const;
     int get_unit_at(godot::Vector2 p_world_pos, float p_radius, int p_faction) const; // faction -1 = 任意

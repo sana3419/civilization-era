@@ -29,15 +29,21 @@ const BUILDINGS := [
 	{ "name": "箭塔", "color": Color("4a4a58") },
 	{ "name": "栅栏", "color": Color("9a7b4f") },
 	{ "name": "城门", "color": Color("c49a5a") },
+	{ "name": "攻城工坊", "color": Color("5a4a3a") },
+	{ "name": "石墙", "color": Color("8a8a96") },
+	{ "name": "石门", "color": Color("aaa9b8") },
 ]
+const WALL_TYPES := [10, 13] # 可拖动划线连放的 1×1 墙体
 # 训练表：单位类型 → 所需建筑/成本（与 src/sim_world.h 对应）
 const TRAIN := [
 	{ "type": 1, "name": "民兵", "building": 6, "wood": 10, "food": 20 },
 	{ "type": 3, "name": "弓手", "building": 7, "wood": 15, "food": 15 },
 	{ "type": 4, "name": "骑兵", "building": 8, "wood": 30, "food": 30 },
 	{ "type": 5, "name": "长枪兵", "building": 6, "wood": 20, "food": 25 },
+	{ "type": 6, "name": "攻城槌", "building": 12, "wood": 60, "stone": 0, "food": 20 },
+	{ "type": 7, "name": "投石车", "building": 12, "wood": 80, "stone": 20, "food": 10 },
 ]
-const UNIT_MAX_HP := [100.0, 60.0, 60.0, 50.0, 80.0, 100.0] # 与 src/sim_world.h STATS 对应
+const UNIT_MAX_HP := [100.0, 60.0, 60.0, 50.0, 80.0, 100.0, 300.0, 200.0] # 与 src/sim_world.h STATS 对应
 const RAID_INTERVAL := 90.0 # 土匪袭扰间隔（模拟秒）
 const FORMATION_NAMES := ["无阵型", "横线阵", "纵队", "方阵", "锥形阵", "盾墙", "圆阵", "散兵线", "新月阵"]
 
@@ -60,6 +66,7 @@ var place_mode := -1 # 建造放置模式：建筑类型，-1 = 关闭
 var bandit_pos := Vector2.ZERO
 var attack_fx := [] # [{from, to, ttl}]
 var raid_timer := RAID_INTERVAL
+var raid_count := 0
 var ghost := ColorRect.new()
 var shot_timer := 0.0
 
@@ -179,17 +186,18 @@ func _build_tilemap() -> void:
 
 func _add_building_visual(type: int, anchor_cell: Vector2i, open := true) -> void:
 	var bsize: int = SimWorld.building_size(type)
+	var is_gate := type == 11 or type == 14
 	var rect := ColorRect.new()
 	rect.color = BUILDINGS[type]["color"]
-	if type == 11 and not open: # 关闭的城门加深
+	if is_gate and not open: # 关闭的城门加深
 		rect.color = rect.color.darkened(0.45)
 	rect.size = Vector2(TILE, TILE) * bsize
 	rect.position = Vector2(anchor_cell) * TILE
 	building_layer.add_child(rect)
-	if type == 10: # 栅栏段不挂名牌（太密）
+	if type in WALL_TYPES: # 墙段不挂名牌（太密）
 		return
 	var tag := Label.new()
-	tag.text = BUILDINGS[type]["name"] if type != 11 else ("门·开" if open else "门·关")
+	tag.text = BUILDINGS[type]["name"] if not is_gate else ("门·开" if open else "门·关")
 	tag.add_theme_font_size_override("font_size", 12 if bsize == 2 else 8)
 	tag.position = Vector2(2, TILE * bsize - (18 if bsize == 2 else 12))
 	rect.add_child(tag)
@@ -223,19 +231,22 @@ func _sync_unit_mesh() -> void:
 
 
 func _make_unit_atlas() -> ImageTexture:
-	# 6 行 × 6 帧：工人（蓝）/ 民兵（银甲红缨）/ 土匪（暗红）/ 弓手（绿帽）/ 骑兵（棕鬃）/ 长枪兵（铁灰金缨）
+	# 8 行 × 6 帧：工人（蓝）/ 民兵（银甲红缨）/ 土匪（暗红）/ 弓手（绿帽）/ 骑兵（棕鬃）/
+	# 长枪兵（铁灰金缨）/ 攻城槌（原木）/ 投石车（深木）
 	var body := [
 		Color(0.25, 0.45, 0.9), Color(0.7, 0.7, 0.78),
 		Color(0.55, 0.15, 0.15), Color(0.5, 0.65, 0.35),
 		Color(0.6, 0.42, 0.2), Color(0.45, 0.5, 0.58),
+		Color(0.62, 0.48, 0.28), Color(0.4, 0.3, 0.18),
 	]
 	var head := [
 		Color(0.95, 0.8, 0.6), Color(0.85, 0.2, 0.2),
 		Color(0.3, 0.25, 0.2), Color(0.2, 0.5, 0.25),
 		Color(0.35, 0.22, 0.1), Color(0.85, 0.7, 0.2),
+		Color(0.35, 0.35, 0.38), Color(0.55, 0.55, 0.6),
 	]
-	var img := Image.create(16 * 6, 16 * 6, false, Image.FORMAT_RGBA8)
-	for row in 6:
+	var img := Image.create(16 * 6, 16 * 8, false, Image.FORMAT_RGBA8)
+	for row in 8:
 		for f in 6:
 			var c: Color = body[row].lightened(0.06 * (f % 3))
 			img.fill_rect(Rect2i(f * 16 + 3, row * 16 + 3, 10, 10), c)
@@ -257,7 +268,7 @@ void vertex() {
 void fragment() {
 	float frame = floor(inst_custom.x);
 	float row = floor(inst_custom.z); // 单位类型 → 图集行
-	vec2 uv = vec2((UV.x + frame) / 6.0, (UV.y + row) / 6.0);
+	vec2 uv = vec2((UV.x + frame) / 6.0, (UV.y + row) / 8.0);
 	COLOR = texture(TEXTURE, uv);
 	if (inst_custom.y > 0.0) {
 		COLOR.rgb = mix(COLOR.rgb, vec3(1.0, 0.85, 0.2), 0.45);
@@ -313,8 +324,8 @@ func _build_hud() -> void:
 func _train_unit(t: Dictionary) -> void:
 	var flat := sim.get_buildings()
 	for b in range(flat.size() / 2):
-		if flat[b * 2] == t["building"]:
-			if sim.try_spend(t["wood"], 0, t["food"]):
+		if flat[b * 2] == t["building"] and sim.get_building_hp(b) > 0.0:
+			if sim.try_spend(t["wood"], t.get("stone", 0), t["food"]):
 				var cell := flat[b * 2 + 1]
 				var pos := Vector2(cell % MAP_DIM, cell / MAP_DIM) * TILE + Vector2(TILE, TILE * 3)
 				sim.spawn_units(t["type"], 1, pos, 0)
@@ -407,10 +418,15 @@ func _process(delta: float) -> void:
 		raid_timer -= step
 		if raid_timer <= 0.0 and bandit_pos != Vector2.ZERO:
 			raid_timer = RAID_INTERVAL
+			raid_count += 1
 			var first: int = sim.spawn_units(2, 3, bandit_pos, 1)
-			sim.command_move(PackedInt32Array(range(first, first + 3)), camp_pos)
+			var n := 3
+			if raid_count % 3 == 0: # 每第三波带一台攻城槌（能破石门）
+				sim.spawn_units(6, 1, bandit_pos + Vector2(0, 48), 1)
+				n = 4
+			sim.command_move(PackedInt32Array(range(first, first + n)), camp_pos)
 			_sync_unit_mesh()
-			info_label.text = "⚔ 土匪来袭！"
+			info_label.text = "⚔ 土匪来袭！" if n == 3 else "⚔ 土匪来袭——带着攻城槌！"
 
 	sim.write_render_buffer(sim_accum / step) # 插值系数
 	if unit_mm.instance_count > 0:
@@ -500,9 +516,9 @@ func _drag_rect() -> Rect2:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseMotion and place_mode == 10 \
+	if event is InputEventMouseMotion and place_mode in WALL_TYPES \
 			and event.button_mask & MOUSE_BUTTON_MASK_LEFT:
-		# 栅栏拖动连放（按住左键划线）
+		# 墙体拖动连放（按住左键划线）
 		var cell := Vector2i(get_global_mouse_position() / TILE)
 		if sim.place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1)):
 			_add_building_visual(place_mode, cell)
@@ -519,8 +535,8 @@ func _unhandled_input(event: InputEvent) -> void:
 						var cell := Vector2i(get_global_mouse_position() / TILE)
 						if sim.place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1)):
 							_add_building_visual(place_mode, cell)
-							# Shift 连放；栅栏默认连放（拖动划线），右键/Esc 退出
-							if not Input.is_key_pressed(KEY_SHIFT) and place_mode != 10:
+							# Shift 连放；墙体默认连放（拖动划线），右键/Esc 退出
+							if not Input.is_key_pressed(KEY_SHIFT) and place_mode not in WALL_TYPES:
 								_exit_place_mode()
 					else:
 						dragging = true
@@ -533,6 +549,8 @@ func _unhandled_input(event: InputEvent) -> void:
 						var enemy: int = sim.get_unit_at(pos, 20.0, 1)
 						if enemy >= 0: # 点敌人 = 集火
 							sim.command_attack(selected, enemy)
+						elif sim.command_garrison(selected, pos):
+							pass # 点己方石墙 = 派一人登墙驻守
 						else:
 							sim.command_gather(selected, pos)
 		elif event.button_index == MOUSE_BUTTON_LEFT and dragging:
