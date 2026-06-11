@@ -43,6 +43,19 @@ struct UnitStats {
     float aggro_range; // px，0 = 不主动索敌
 };
 
+enum Formation : uint8_t {
+    F_NONE = 0, // 无阵型（默认）
+    F_LINE = 1, // 横线阵
+    F_COLUMN = 2, // 纵队
+    F_SQUARE = 3, // 方阵
+    F_WEDGE = 4, // 锥形阵
+    F_SHIELD = 5, // 盾墙
+    F_CIRCLE = 6, // 圆阵（方环近似）
+    F_SKIRMISH = 7, // 散兵线
+    F_CRESCENT = 8, // 新月阵
+    F_COUNT = 9,
+};
+
 enum BuildingType : uint8_t {
     B_CAMP = 0, // 营地：万能存储点
     B_LUMBER = 1, // 伐木场：木材存储点
@@ -92,6 +105,7 @@ class SimWorld : public godot::RefCounted {
     std::vector<int32_t> attack_target; // 单位 id，-1 = 无
     std::vector<float> morale; // 0-100，基线 60
     std::vector<float> home_x, home_y; // 出生点（溃逃目的地）
+    std::vector<uint8_t> formation; // F_*
 
     // 本帧攻击事件（渲染特效用，瞬态不序列化）：[attacker, target, ...]
     godot::PackedInt32Array attack_events;
@@ -146,6 +160,8 @@ public:
     void command_move(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_gather(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_attack(const godot::PackedInt32Array &p_ids, int p_target_id);
+    void command_set_formation(const godot::PackedInt32Array &p_ids, int p_formation);
+    int get_unit_formation(int p_id) const;
     int get_unit_at(godot::Vector2 p_world_pos, float p_radius, int p_faction) const; // faction -1 = 任意
 
     bool can_place_building(int p_type, godot::Vector2 p_world_pos) const;

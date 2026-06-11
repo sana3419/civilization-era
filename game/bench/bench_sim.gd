@@ -303,6 +303,28 @@ func _bench_combat() -> void:
 	print("morale: outnumbered militia fled %s" % [
 		_check(fled[0] and fled[1], "morale break"),
 	])
+	# 阵型：盾墙（防 ×1.5）5v5 应比无阵型 5v5（剩 1）打出更好的交换比
+	var ws := _run_shield_sim()
+	print("formation shield-wall 5v5: player %d vs bandit %d | %s" % [
+		ws.count_alive(0), ws.count_alive(1),
+		_check(ws.count_alive(1) == 0 and ws.count_alive(0) >= 2, "shield wall defense"),
+	])
+
+
+func _run_shield_sim() -> SimWorld:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var p := Vector2(260, 260) * 32.0
+	var first := w.spawn_units(1, 5, p - Vector2(80, 0), 0)
+	w.spawn_units(2, 5, p + Vector2(80, 0), 1)
+	var ids := PackedInt32Array(range(first, first + 5))
+	w.command_set_formation(ids, 5) # 盾墙
+	for i in 900:
+		w.tick(0.1)
+	return w
 
 
 func _run_archer_sim() -> SimWorld:

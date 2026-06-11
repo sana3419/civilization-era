@@ -49,6 +49,22 @@ static inline float morale_mult(float p_m) {
     return 0.5f;
 }
 
+// 阵型系数表（设计文档：攻/防/速；冲锋系数留待冲锋机制）
+struct FormationMod {
+    float atk, def, speed;
+};
+static constexpr FormationMod FORM[F_COUNT] = {
+    { 1.0f, 1.0f, 1.0f }, // 无
+    { 1.0f, 0.9f, 1.0f }, // 横线
+    { 0.8f, 0.8f, 1.2f }, // 纵队
+    { 0.9f, 1.1f, 0.9f }, // 方阵
+    { 1.1f, 0.8f, 1.1f }, // 锥形
+    { 0.7f, 1.5f, 0.5f }, // 盾墙
+    { 0.8f, 1.3f, 0.3f }, // 圆阵
+    { 1.1f, 0.7f, 1.1f }, // 散兵线
+    { 1.0f, 0.9f, 0.9f }, // 新月
+};
+
 // 兵种克制系数 [攻击方][防守方]（设计文档克制表：轻步兵→弓兵 ×1.2，弓兵→轻步兵 ×1.1）
 static constexpr float COUNTER[UT_COUNT][UT_COUNT] = {
     { 1.0f, 1.0f, 1.0f, 1.0f }, // 工人
@@ -81,6 +97,7 @@ void SimWorld::resize_arrays(int p_count) {
     morale.resize(p_count, 60.0f);
     home_x.resize(p_count, 0.0f);
     home_y.resize(p_count, 0.0f);
+    formation.resize(p_count, F_NONE);
 
     new_x.resize(p_count);
     new_y.resize(p_count);
@@ -326,23 +343,131 @@ const FlowField *SimWorld::ensure_field(int32_t p_goal) {
     return ff.ptr();
 }
 
+// 阵型槽位局部坐标（offx 沿横排，offy 沿纵深，+y = 阵后）。无三角函数。
+static void formation_offset(uint8_t p_form, int p_k, int p_n, float &r_offx, float &r_offy) {
+    float sp = 20.0f;
+    int width;
+    switch (p_form) {
+        case F_LINE:
+            width = std::max(1, (p_n + 1) / 2); // 最多 2 排
+            break;
+        case F_COLUMN:
+            width = std::max(1, int(std::ceil(std::sqrt(float(p_n)) * 0.5f)));
+            break;
+        case F_SHIELD:
+            sp *= 0.7f; // 盾墙：间距 -30%
+            width = std::max(1, (p_n + 1) / 2);
+            break;
+        case F_SKIRMISH:
+            sp *= 2.0f; // 散兵线：间距 ×2
+            width = std::max(1, int(std::ceil(std::sqrt(float(p_n)))));
+            break;
+        case F_WEDGE: { // 锥形：第 r 排 r+1 人，尖端朝前
+            int r = 0, base = 0;
+            while (base + r + 1 <= p_k) {
+                base += r + 1;
+                r++;
+            }
+            const int idx = p_k - base;
+            r_offx = (float(idx) - float(r) * 0.5f) * sp;
+            r_offy = float(r) * sp;
+            return;
+        }
+        case F_CIRCLE: { // 圆阵：方环近似（每环 8r 个位）
+            int r = 1, base = 0;
+            while (base + 8 * r <= p_k) {
+                base += 8 * r;
+                r++;
+            }
+            const int idx = p_k - base;
+            const int side_len = 2 * r;
+            const int side = idx / side_len;
+            const int t = idx % side_len;
+            const float half = float(r) * sp;
+            const float along = (float(t) - float(side_len - 1) * 0.5f) * sp;
+            switch (side) {
+                case 0: r_offx = along; r_offy = -half; break;
+                case 1: r_offx = half; r_offy = along; break;
+                case 2: r_offx = -along; r_offy = half; break;
+                default: r_offx = -half; r_offy = -along; break;
+            }
+            return;
+        }
+        case F_CRESCENT: { // 新月：横排 + 两翼前弯
+            width = std::max(1, (p_n + 1) / 2);
+            const int col = p_k % width, row = p_k / width;
+            r_offx = (float(col) - float(width - 1) * 0.5f) * sp;
+            r_offy = float(row) * sp - std::abs(r_offx) * 0.4f;
+            return;
+        }
+        default: // 方阵 / 无阵型
+            width = std::max(1, int(std::ceil(std::sqrt(float(p_n)))));
+            break;
+    }
+    r_offx = (float(p_k % width) - float(width - 1) * 0.5f) * sp;
+    r_offy = float(p_k / width) * sp;
+}
+
 void SimWorld::command_move(const PackedInt32Array &p_ids, Vector2 p_world_pos) {
     const int32_t goal = cell_of_pos(p_world_pos.x, p_world_pos.y);
-    // 方阵阵型槽位：按选中顺序排格，间距 20px，整体居中于目标点
     const int n = p_ids.size();
-    const int cols = std::max(1, int(std::ceil(std::sqrt(float(n)))));
-    const float spacing = 20.0f;
+    if (n == 0) {
+        return;
+    }
+    // 朝向 = 队伍质心 → 目标（归一化向量做旋转基，IEEE 精确，无三角函数）
+    float cx = 0.0f, cy = 0.0f;
+    int valid = 0;
     for (int k = 0; k < n; k++) {
         const int i = p_ids[k];
-        if (i < 0 || i >= unit_count || state[i] == U_WANDER) {
+        if (i >= 0 && i < unit_count) {
+            cx += pos_x[i];
+            cy += pos_y[i];
+            valid++;
+        }
+    }
+    float fx = 0.0f, fy = -1.0f; // 默认朝上
+    if (valid > 0) {
+        cx /= float(valid);
+        cy /= float(valid);
+        const float ddx = p_world_pos.x - cx;
+        const float ddy = p_world_pos.y - cy;
+        const float len2 = ddx * ddx + ddy * ddy;
+        if (len2 > 1.0f) {
+            const float inv = 1.0f / std::sqrt(len2);
+            fx = ddx * inv;
+            fy = ddy * inv;
+        }
+    }
+    const float rx = -fy, ry = fx; // 横排方向（朝向的垂线）
+    const uint8_t form = (p_ids[0] >= 0 && p_ids[0] < unit_count) ? formation[p_ids[0]] : F_NONE;
+
+    for (int k = 0; k < n; k++) {
+        const int i = p_ids[k];
+        if (i < 0 || i >= unit_count || state[i] == U_WANDER || state[i] == U_FLEE) {
             continue;
         }
+        float offx = 0.0f, offy = 0.0f;
+        formation_offset(form, k, n, offx, offy);
         state[i] = U_MOVING;
         goal_cell[i] = goal;
-        slot_x[i] = p_world_pos.x + (float(k % cols) - float(cols - 1) * 0.5f) * spacing;
-        slot_y[i] = p_world_pos.y + (float(k / cols) - float((n - 1) / cols) * 0.5f) * spacing;
+        slot_x[i] = p_world_pos.x + rx * offx - fx * offy; // offy 为阵后 → 反向于朝向
+        slot_y[i] = p_world_pos.y + ry * offx - fy * offy;
         timer[i] = 0.0f;
     }
+}
+
+void SimWorld::command_set_formation(const PackedInt32Array &p_ids, int p_formation) {
+    const uint8_t f = uint8_t(std::clamp(p_formation, 0, int(F_COUNT) - 1));
+    for (int k = 0; k < p_ids.size(); k++) {
+        const int i = p_ids[k];
+        if (i >= 0 && i < unit_count && state[i] != U_WANDER) {
+            formation[i] = f;
+        }
+    }
+}
+
+int SimWorld::get_unit_formation(int p_id) const {
+    return (p_id >= 0 && p_id < unit_count) ? formation[p_id] : 0;
 }
 
 void SimWorld::command_gather(const PackedInt32Array &p_ids, Vector2 p_world_pos) {
@@ -564,7 +689,8 @@ void SimWorld::logic_pass(float p_dt) {
                     timer[i] -= p_dt;
                     if (timer[i] <= 0.0f) {
                         timer[i] = st.attack_interval;
-                        hp[t] -= st.damage * COUNTER[u_type[i]][u_type[t]] * morale_mult(morale[i]);
+                        hp[t] -= st.damage * COUNTER[u_type[i]][u_type[t]] * morale_mult(morale[i]) *
+                                FORM[formation[i]].atk / FORM[formation[t]].def;
                         attack_events.push_back(i);
                         attack_events.push_back(t);
                         if (hp[t] <= 0.0f) {
@@ -669,12 +795,12 @@ void SimWorld::move_range(int p_begin, int p_end, float p_dt) {
             ff->sample_raw(pos_x[i], pos_y[i], dx, dy);
         }
         // 地形速度系数：cost 10 → 1.0，cost 25 → 0.4
-        float mult = 1.0f;
+        float mult = FORM[formation[i]].speed;
         if (map.is_valid()) {
             const int32_t c = cell_of_pos(pos_x[i], pos_y[i]);
             const int mc = GameMap::terrain_move_cost(map->terrain_at(c % grid_dim, c / grid_dim));
             if (mc > 0) {
-                mult = 10.0f / float(mc);
+                mult *= 10.0f / float(mc);
             }
         }
         vel_x[i] = dx * UNIT_SPEED * mult;
@@ -1003,7 +1129,7 @@ PackedInt32Array SimWorld::get_buildings() const {
 // 存档格式 v2：+ 状态机数组 + 库存 + 存储点。
 // 数据布局变更必须升版本号；golden 基线随逻辑变更重置（删 golden_hash.txt 重新初始化）。
 static constexpr uint32_t SAVE_MAGIC = 0x57564943; // "CIVW" LE
-static constexpr uint32_t SAVE_VERSION = 5; // v5: + 士气/出生点
+static constexpr uint32_t SAVE_VERSION = 6; // v6: + 阵型
 
 template <typename T>
 static void blob_write(PackedByteArray &r_out, const T *p_data, size_t p_count) {
@@ -1056,6 +1182,7 @@ PackedByteArray SimWorld::save_state() const {
     blob_write(out, morale.data(), morale.size());
     blob_write(out, home_x.data(), home_x.size());
     blob_write(out, home_y.data(), home_y.size());
+    blob_write(out, formation.data(), formation.size());
     const int32_t n_buildings = int32_t(b_cell.size());
     blob_write(out, &n_buildings, 1);
     blob_write(out, b_type.data(), b_type.size());
@@ -1105,7 +1232,8 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
             !blob_read(p_data, at, attack_target.data(), attack_target.size()) ||
             !blob_read(p_data, at, morale.data(), morale.size()) ||
             !blob_read(p_data, at, home_x.data(), home_x.size()) ||
-            !blob_read(p_data, at, home_y.data(), home_y.size())) {
+            !blob_read(p_data, at, home_y.data(), home_y.size()) ||
+            !blob_read(p_data, at, formation.data(), formation.size())) {
         return false;
     }
     int32_t n_buildings = 0;
@@ -1144,6 +1272,7 @@ int64_t SimWorld::state_hash() const {
     mix_bytes(hp.data(), hp.size() * 4);
     mix_bytes(alive.data(), alive.size());
     mix_bytes(morale.data(), morale.size() * 4);
+    mix_bytes(formation.data(), formation.size());
     mix_bytes(b_type.data(), b_type.size());
     mix_bytes(b_cell.data(), b_cell.size() * 4);
     return int64_t(h);
@@ -1165,6 +1294,8 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("command_attack", "ids", "target_id"), &SimWorld::command_attack);
     ClassDB::bind_method(D_METHOD("get_unit_at", "world_pos", "radius", "faction"), &SimWorld::get_unit_at);
     ClassDB::bind_method(D_METHOD("count_state", "state", "faction"), &SimWorld::count_state);
+    ClassDB::bind_method(D_METHOD("command_set_formation", "ids", "formation"), &SimWorld::command_set_formation);
+    ClassDB::bind_method(D_METHOD("get_unit_formation", "id"), &SimWorld::get_unit_formation);
     ClassDB::bind_method(D_METHOD("get_unit_morale", "id"), &SimWorld::get_unit_morale);
     ClassDB::bind_method(D_METHOD("command_move", "ids", "world_pos"), &SimWorld::command_move);
     ClassDB::bind_method(D_METHOD("command_gather", "ids", "world_pos"), &SimWorld::command_gather);

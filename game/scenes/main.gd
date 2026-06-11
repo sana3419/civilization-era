@@ -32,6 +32,7 @@ const TRAIN := [
 	{ "type": 3, "name": "弓手", "building": 7, "wood": 15, "food": 15 },
 ]
 const UNIT_MAX_HP := [100.0, 60.0, 60.0, 50.0] # 与 src/sim_world.h STATS 对应
+const FORMATION_NAMES := ["无阵型", "横线阵", "纵队", "方阵", "锥形阵", "盾墙", "圆阵", "散兵线", "新月阵"]
 
 var map: GameMap
 var sim: SimWorld
@@ -508,7 +509,17 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			selected = PackedInt32Array()
 	elif key.keycode == KEY_A and key.ctrl_pressed:
 		selected = PackedInt32Array(range(sim.get_unit_count()))
-	elif key.keycode == KEY_F5:
+	elif key.keycode >= KEY_F1 and key.keycode <= KEY_F8 and selected.size() > 0:
+		var f := key.keycode - KEY_F1 + 1 # F1=横线 … F8=新月
+		sim.command_set_formation(selected, f)
+		# 以当前质心重整队形
+		var pts := sim.get_unit_positions(selected)
+		var c := Vector2.ZERO
+		for p in pts:
+			c += p
+		sim.command_move(selected, c / pts.size())
+		info_label.text = "阵型：" + FORMATION_NAMES[f]
+	elif key.keycode == KEY_S and key.ctrl_pressed:
 		_save_game()
 	elif key.keycode == KEY_F9:
 		_load_game()
