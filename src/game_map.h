@@ -2,6 +2,7 @@
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 
 #include <cstdint>
 #include <vector>
@@ -38,6 +39,7 @@ class GameMap : public godot::RefCounted {
     uint32_t seed = 0;
     std::vector<uint8_t> terrain;
     std::vector<uint16_t> resource_amount; // 每格剩余资源量
+    godot::PackedInt32Array terrain_events; // 本帧地形变化格（瞬态，渲染刷新用）
 
 public:
     void generate(int p_dim, int p_seed);
@@ -60,8 +62,11 @@ public:
         return terrain[size_t(p_cy) * dim + p_cx];
     }
     inline uint16_t resource_at(size_t p_cell) const { return resource_amount[p_cell]; }
-    // 从格子取走至多 p_amount，返回实际取得
+    // 从格子取走至多 p_amount，返回实际取得；枯竭森林退化为草地
     int take_resource(size_t p_cell, int p_amount);
+    godot::PackedInt32Array take_terrain_events(); // 取走并清空
+    // GDScript 包装（bench/调试用）
+    int take_resource_at(int p_cell, int p_amount) { return take_resource(size_t(p_cell), p_amount); }
     static int terrain_move_cost(uint8_t p_t);
     // 地形产出的资源类型（RES_*），-1 = 无
     static int terrain_resource(uint8_t p_t);

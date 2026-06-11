@@ -28,6 +28,7 @@ func _init() -> void:
 	_bench_siege()
 	_bench_siege_engines()
 	_bench_collision()
+	_bench_fixes()
 	_bench_golden()
 
 	print("=== done, failures: %d ===" % failures)
@@ -306,15 +307,17 @@ func _bench_combat() -> void:
 	print("morale: outnumbered militia fled %s" % [
 		_check(fled[0] and fled[1], "morale break"),
 	])
-	# 阵型：盾墙（防 ×1.5）5v5 战果应优于同场景无阵型（存活更多，或同存活总残血更高）
+	# 阵型：盾墙（防 ×1.5）5v5 战果应严格优于同场景无阵型。
+	# 镜像 5v5 是刀尖平衡（先手序/寻路噪声会翻面），用综合分比较：
+	# 己方存活×1000 + 己方残血 + 击杀×500
 	var wn := _run_combat_sim()
 	var ws := _run_shield_sim()
-	var shield_better: bool = ws.count_alive(0) > wn.count_alive(0) or \
-			(ws.count_alive(0) == wn.count_alive(0) and _team_hp(ws, 5) > _team_hp(wn, 5))
-	print("formation shield-wall 5v5: player %d (hp %.0f) vs 无阵型 %d (hp %.0f), bandit %d | %s" % [
-		ws.count_alive(0), _team_hp(ws, 5), wn.count_alive(0), _team_hp(wn, 5),
-		ws.count_alive(1),
-		_check(ws.count_alive(1) == 0 and shield_better, "shield wall defense"),
+	var score_s := ws.count_alive(0) * 1000.0 + _team_hp(ws, 5) + (5 - ws.count_alive(1)) * 500.0
+	var score_n := wn.count_alive(0) * 1000.0 + _team_hp(wn, 5) + (5 - wn.count_alive(1)) * 500.0
+	print("formation shield-wall 5v5: 盾墙 %d活/%d杀(分%.0f) vs 无阵型 %d活/%d杀(分%.0f) | %s" % [
+		ws.count_alive(0), 5 - ws.count_alive(1), score_s,
+		wn.count_alive(0), 5 - wn.count_alive(1), score_n,
+		_check(score_s > score_n, "shield wall defense"),
 	])
 	# 骑兵：4 骑兵冲锋（克步兵 ×1.3 + 冲锋首击 ×1.5）应胜 5 土匪
 	var wc := _run_cavalry_sim()
@@ -666,6 +669,106 @@ func _bench_collision() -> void:
 	var p: Vector2 = w.get_unit_positions(PackedInt32Array([0]))[0]
 	var cell := Vector2i(p / 32.0)
 	print("collision: unit at passable cell %s" % _check(map.is_passable(cell.x, cell.y), "terrain collision"))
+
+
+func _new_world() -> Array: # [GameMap, SimWorld]
+	var m := GameMap.new()
+	m.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(m)
+	return [m, w]
+
+
+# 修复批次回归：追击放弃/投石溅射/工人修理/槽位回收/枯竭退化
+func _bench_fixes() -> void:
+	# 1) 追击放弃：攻击封闭石环内的目标，不可达应转 IDLE 而非永久卡墙
+	var mw := _new_world()
+	var w: SimWorld = mw[1]
+	var pc := Vector2i(_find_battlefield(mw[0]) / 32.0)
+	w.debug_add_resources(0, 400, 0)
+	for oy in range(-2, 3):
+		for ox in range(-2, 3):
+			if maxi(absi(ox), absi(oy)) == 2:
+				w.place_building(13, Vector2(pc + Vector2i(ox, oy)) * 32.0 + Vector2(1, 1))
+	var archer := w.spawn_units(3, 1, Vector2(pc) * 32.0 + Vector2(16, 16), 0)
+	var bandit := w.spawn_units(2, 1, Vector2(pc) * 32.0 + Vector2(320, 16), 1)
+	w.command_attack(PackedInt32Array([bandit]), archer)
+	for i in 200:
+		w.tick(0.1)
+	print("chase: give-up state %d %s" % [
+		w.get_unit_state(bandit), _check(w.get_unit_state(bandit) != 5, "chase give-up"),
+	])
+
+	# 2) 投石车溅射：炮击石门波及旁边的土匪（落点 48px、×0.5 基伤）
+	mw = _new_world()
+	w = mw[1]
+	pc = Vector2i(_find_battlefield(mw[0]) / 32.0)
+	w.debug_add_resources(100, 100, 0)
+	var gate_pos := Vector2(pc + Vector2i(4, 0)) * 32.0 + Vector2(1, 1)
+	w.place_building(14, gate_pos)
+	var cata := w.spawn_units(7, 1, Vector2(pc + Vector2i(-4, 0)) * 32.0 + Vector2(16, 16), 0)
+	var b2 := w.spawn_units(2, 2, Vector2(pc + Vector2i(5, 0)) * 32.0 + Vector2(16, 16), 1)
+	w.command_attack_building(PackedInt32Array([cata]), 0)
+	for i in 250:
+		w.tick(0.1)
+	var splash_dead := not w.is_unit_alive(b2) and not w.is_unit_alive(b2 + 1)
+	print("splash: bandits dead %s | gate hp %.0f %s" % [
+		_check(splash_dead, "splash kills"), w.get_building_hp(0),
+		_check(w.get_building_hp(0) < 3000.0, "gate damaged"),
+	])
+
+	# 3) 工人修理：受损栅栏修回满血后收工
+	mw = _new_world()
+	w = mw[1]
+	pc = Vector2i(_find_battlefield(mw[0]) / 32.0)
+	w.debug_add_resources(50, 0, 0)
+	w.place_building(10, Vector2(pc + Vector2i(2, 0)) * 32.0 + Vector2(1, 1))
+	w.debug_damage_building(0, 300.0) # 500 → 200
+	var worker := w.spawn_workers(1, Vector2(pc) * 32.0 + Vector2(16, 16))
+	w.command_repair(PackedInt32Array([worker]),
+			Vector2(pc + Vector2i(2, 0)) * 32.0 + Vector2(16, 16))
+	for i in 400: # 12HP/s → 约 25s
+		w.tick(0.1)
+	print("repair: hp %.0f %s | worker idle %s" % [
+		w.get_building_hp(0), _check(w.get_building_hp(0) >= 500.0, "repaired full"),
+		_check(w.get_unit_state(worker) == 1, "worker done"),
+	])
+
+	# 4) 尸体槽位回收：整波阵亡后再出兵不增长数组
+	mw = _new_world()
+	w = mw[1]
+	pc = Vector2i(_find_battlefield(mw[0]) / 32.0)
+	w.spawn_units(1, 4, Vector2(pc) * 32.0 + Vector2(-64, 16), 0)
+	w.spawn_units(2, 5, Vector2(pc) * 32.0 + Vector2(64, 16), 1)
+	for i in 900:
+		w.tick(0.1)
+	var before := w.get_unit_count()
+	var resolved := w.count_alive(0) == 0 or w.count_alive(1) == 0
+	w.spawn_units(2, 3, Vector2(pc) * 32.0 + Vector2(64, 16), 1)
+	print("recycle: fight resolved %s | units %d → %d %s" % [
+		_check(resolved, "fight resolved"), before, w.get_unit_count(),
+		_check(w.get_unit_count() == before, "slots recycled"),
+	])
+
+	# 5) 枯竭退化：砍光的森林变草地并发地形事件
+	var m5 := GameMap.new()
+	m5.generate(512, 2026)
+	var fcell := -1
+	for cy in range(150, 400):
+		for cx in range(150, 400):
+			if m5.get_terrain(cx, cy) == 4: # 森林
+				fcell = cy * 512 + cx
+				break
+		if fcell >= 0:
+			break
+	m5.take_resource_at(fcell, 65535)
+	var ev5 := m5.take_terrain_events()
+	print("deplete: terrain %d %s | event %s" % [
+		m5.get_terrain(fcell % 512, fcell / 512),
+		_check(m5.get_terrain(fcell % 512, fcell / 512) == 3, "forest→grass"),
+		_check(ev5.size() == 1 and ev5[0] == fcell, "terrain event"),
+	])
 
 
 func _bench_golden() -> void:

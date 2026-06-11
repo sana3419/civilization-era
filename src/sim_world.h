@@ -26,6 +26,7 @@ enum UnitState : uint8_t {
     U_ATTACK = 5, // 追击 attack_target 并近战
     U_FLEE = 6, // 士气崩溃，逃向出生点，恢复后转 IDLE
     U_GARRISON = 7, // 驻守石墙顶（防御×5、射程+2格），不移动
+    U_REPAIR = 8, // 工人修理受损建筑（贴近后 12HP/s）
 };
 
 enum UnitType : uint8_t {
@@ -176,6 +177,8 @@ class SimWorld : public godot::RefCounted {
     int32_t find_nearest_blocking_building(int p_unit) const; // 攻城目标：城门优先，串行调用
     void destroy_building(int p_b);
     void release_garrison(int p_unit); // 离墙：清驻军占位（换命令/死亡/溃逃时调用）
+    void splash_damage(int p_attacker, float p_x, float p_y); // 投石车溅射（串行调用）
+    godot::Vector2 find_free_spot(godot::Vector2 p_pos, uint8_t p_faction) const; // 出生点防实体格
 
 public:
     void setup(int p_count, float p_world_size, int p_seed, int p_threads);
@@ -192,6 +195,10 @@ public:
     void command_attack(const godot::PackedInt32Array &p_ids, int p_target_id);
     void command_attack_building(const godot::PackedInt32Array &p_ids, int p_building);
     bool command_garrison(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
+    bool command_repair(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
+    void despawn_unit(int p_id); // 静默移除（无士气涟漪），槽位可复用
+    int get_unit_faction(int p_id) const;
+    static float unit_max_hp(int p_type); // STATS 表单一来源，GDScript 查询用
     void command_set_formation(const godot::PackedInt32Array &p_ids, int p_formation);
     int get_unit_formation(int p_id) const;
     int get_unit_at(godot::Vector2 p_world_pos, float p_radius, int p_faction) const; // faction -1 = 任意

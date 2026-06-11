@@ -254,17 +254,74 @@ int SimWorld::spawn_workers(int p_count, Vector2 p_world_pos) {
     return spawn_units(UT_WORKER, p_count, p_world_pos, 0);
 }
 
+// 出生点落在实体格（墙里/水里）时螺旋找最近可站格中心（确定性整数扫描）
+Vector2 SimWorld::find_free_spot(Vector2 p_pos, uint8_t p_faction) const {
+    if (map.is_null()) {
+        return p_pos;
+    }
+    const int cx = int(p_pos.x / CELL_SIZE), cy = int(p_pos.y / CELL_SIZE);
+    if (!cell_blocked_for(cx, cy, p_faction)) {
+        return p_pos;
+    }
+    for (int r = 1; r <= 8; r++) {
+        for (int oy = -r; oy <= r; oy++) {
+            for (int ox = -r; ox <= r; ox++) {
+                if (std::max(std::abs(ox), std::abs(oy)) != r) {
+                    continue;
+                }
+                if (!cell_blocked_for(cx + ox, cy + oy, p_faction)) {
+                    return Vector2(float(cx + ox) * CELL_SIZE + CELL_SIZE * 0.5f,
+                            float(cy + oy) * CELL_SIZE + CELL_SIZE * 0.5f);
+                }
+            }
+        }
+    }
+    return p_pos; // 8 格内没空地：放原点（能走出自己格）
+}
+
 int SimWorld::spawn_units(int p_type, int p_count, Vector2 p_world_pos, int p_faction) {
-    const int first = unit_count;
-    unit_count += p_count;
-    resize_arrays(unit_count);
     const uint8_t type = uint8_t(std::clamp(p_type, 0, int(UT_COUNT) - 1));
+    // 尸体槽位复用：调用方依赖"first + 连续区间"语义，因此找最小的整段
+    // 连续死亡块（袭扰波次整队阵亡，整块回收命中率高）；找不到则追加。
+    // 纯派生自 alive[]，无需入档，读档后复用顺序一致。
+    int first = -1;
+    for (int s = 0; s + p_count <= unit_count; s++) {
+        bool ok = true;
+        for (int k = 0; k < p_count; k++) {
+            if (alive[s + k]) {
+                ok = false;
+                s += k; // 跳过活人，下轮从其后继续
+                break;
+            }
+        }
+        if (ok) {
+            first = s;
+            break;
+        }
+    }
+    if (first < 0) {
+        first = unit_count;
+        unit_count += p_count;
+        resize_arrays(unit_count);
+    } else {
+        for (int a = 0; a < unit_count; a++) { // 清掉指向旧尸体的陈旧目标
+            if (attack_target[a] >= first && attack_target[a] < first + p_count) {
+                attack_target[a] = -1;
+            }
+        }
+    }
     // 方阵排布（确定性整数，无 rng/三角函数）
     const int cols = std::max(1, int(std::ceil(std::sqrt(float(p_count)))));
     for (int k = 0; k < p_count; k++) {
         const int i = first + k;
-        pos_x[i] = p_world_pos.x + float(k % cols - cols / 2) * 16.0f;
-        pos_y[i] = p_world_pos.y + float(k / cols - cols / 2) * 16.0f;
+        const Vector2 spot = find_free_spot(
+                Vector2(p_world_pos.x + float(k % cols - cols / 2) * 16.0f,
+                        p_world_pos.y + float(k / cols - cols / 2) * 16.0f),
+                uint8_t(p_faction));
+        pos_x[i] = spot.x;
+        pos_y[i] = spot.y;
+        way_x[i] = slot_x[i] = pos_x[i]; // 槽位复用：清干净旧战斗残留
+        way_y[i] = slot_y[i] = pos_y[i];
         vel_x[i] = vel_y[i] = 0.0f;
         rng_state[i] = uint32_t(i) * 2654435761u + 1u;
         state[i] = U_IDLE;
@@ -333,6 +390,57 @@ void SimWorld::command_attack_building(const PackedInt32Array &p_ids, int p_buil
         goal_cell[i] = -1; // 无后续行军目标：拆完待命
         timer[i] = 0.0f;
     }
+}
+
+// 修理：点选受损己方建筑，工人贴近后 12HP/s 恢复（废墟不可修，原地重建即可）
+bool SimWorld::command_repair(const PackedInt32Array &p_ids, Vector2 p_world_pos) {
+    const int32_t cell = cell_of_pos(p_world_pos.x, p_world_pos.y);
+    const int cx = cell % grid_dim, cy = cell / grid_dim;
+    int target = -1;
+    for (size_t b = 0; b < b_cell.size(); b++) {
+        if (b_hp[b] <= 0.0f || b_hp[b] >= building_max_hp(b_type[b])) {
+            continue;
+        }
+        const int fp = building_footprint(b_type[b]);
+        const int bx = b_cell[b] % grid_dim, by = b_cell[b] / grid_dim;
+        if (cx >= bx && cx < bx + fp && cy >= by && cy < by + fp) {
+            target = int(b);
+            break;
+        }
+    }
+    if (target < 0) {
+        return false;
+    }
+    bool any = false;
+    for (int k = 0; k < p_ids.size(); k++) {
+        const int i = p_ids[k];
+        if (i < 0 || i >= unit_count || !alive[i] || u_type[i] != UT_WORKER ||
+                state[i] == U_WANDER) {
+            continue;
+        }
+        state[i] = U_REPAIR;
+        target_cell[i] = -2 - target;
+        timer[i] = 0.0f;
+        any = true;
+    }
+    return any;
+}
+
+void SimWorld::despawn_unit(int p_id) {
+    if (p_id < 0 || p_id >= unit_count || !alive[p_id]) {
+        return;
+    }
+    release_garrison(p_id);
+    alive[p_id] = 0; // 静默移除：无士气涟漪，槽位等待复用
+    hp[p_id] = 0.0f;
+}
+
+int SimWorld::get_unit_faction(int p_id) const {
+    return (p_id >= 0 && p_id < unit_count) ? faction[p_id] : -1;
+}
+
+float SimWorld::unit_max_hp(int p_type) {
+    return (p_type >= 0 && p_type < UT_COUNT) ? STATS[p_type].max_hp : 0.0f;
 }
 
 // 登墙：点选可驻军墙体，派一个单位上墙（每段石墙驻 1 人）
@@ -461,6 +569,40 @@ void SimWorld::destroy_building(int p_b) {
         if (alive[g] && state[g] == U_GARRISON) {
             state[g] = U_IDLE;
             target_cell[g] = -1;
+        }
+    }
+}
+
+// 投石车落点溅射：48px 内所有单位（含友军——攻城波及）吃 50% 基伤；
+// 对墙上单位 ×1.5（设计反制：攻城器械克驻军，替代墙防）。串行 logic_pass 调用。
+void SimWorld::splash_damage(int p_attacker, float p_x, float p_y) {
+    constexpr float RADIUS = 48.0f;
+    const float base = STATS[u_type[p_attacker]].damage * 0.5f * morale_mult(morale[p_attacker]);
+    const int cr = int(RADIUS / CELL_SIZE) + 1;
+    const int cx = std::clamp(int(p_x / CELL_SIZE), 0, grid_dim - 1);
+    const int cy = std::clamp(int(p_y / CELL_SIZE), 0, grid_dim - 1);
+    for (int gy = std::max(0, cy - cr); gy <= std::min(grid_dim - 1, cy + cr); gy++) {
+        for (int gx = std::max(0, cx - cr); gx <= std::min(grid_dim - 1, cx + cr); gx++) {
+            const uint32_t cell = uint32_t(gy) * grid_dim + gx;
+            for (uint32_t e = cell_starts[cell]; e < cell_starts[cell + 1]; e++) {
+                const int32_t j = int32_t(cell_entries[e]);
+                if (!alive[j] || j == p_attacker) {
+                    continue;
+                }
+                const float dx = pos_x[j] - p_x;
+                const float dy = pos_y[j] - p_y;
+                if (dx * dx + dy * dy > RADIUS * RADIUS) {
+                    continue;
+                }
+                hp[j] -= base * (state[j] == U_GARRISON ? 1.5f : 1.0f);
+                attack_events.push_back(p_attacker);
+                attack_events.push_back(j);
+                if (hp[j] <= 0.0f) {
+                    hp[j] = 0.0f;
+                    alive[j] = 0;
+                    on_unit_killed(j);
+                }
+            }
         }
     }
 }
@@ -951,6 +1093,9 @@ void SimWorld::logic_pass(float p_dt) {
                                     morale_mult(morale[i]) * FORM[formation[i]].atk;
                             attack_events.push_back(i);
                             attack_events.push_back(-int32_t(b) - 1); // 事件侧沿用 -(index+1)
+                            if (u_type[i] == UT_CATAPULT) {
+                                splash_damage(i, bx, by); // 范围攻击：落点波及（不分敌我）
+                            }
                             if (b_hp[b] <= 0.0f) {
                                 destroy_building(b);
                             }
@@ -981,6 +1126,8 @@ void SimWorld::logic_pass(float p_dt) {
                 const float dy = pos_y[t] - pos_y[i];
                 const float reach = st.attack_range + UNIT_RADIUS * 2.0f;
                 if (dx * dx + dy * dy <= reach * reach) { // 攻击范围内：站定输出
+                    slot_x[i] = pos_x[i]; // 锚定（否则弓手会边射边贴脸/挤墙）
+                    slot_y[i] = pos_y[i];
                     timer[i] -= p_dt;
                     if (timer[i] <= 0.0f) {
                         timer[i] = st.attack_interval;
@@ -1003,8 +1150,30 @@ void SimWorld::logic_pass(float p_dt) {
                     }
                     break;
                 }
-                slot_x[i] = pos_x[t]; // 追击点 → move_range 直线驶向
+                // 追击：走流场（绕墙/绕水），仅相邻格直线；不可达放弃（真碰撞后不再能渗入，
+                // 隔墙 2-3 格的直线追击同样会卡死，故直线区只留 1 格）
+                slot_x[i] = pos_x[t];
                 slot_y[i] = pos_y[t];
+                const int32_t cell = cell_of_pos(pos_x[i], pos_y[i]);
+                const int32_t tcell = cell_of_pos(pos_x[t], pos_y[t]);
+                if (std::max(std::abs(cell % grid_dim - tcell % grid_dim),
+                            std::abs(cell / grid_dim - tcell / grid_dim)) > 1) {
+                    const FlowField *ff = ensure_field(tcell, faction[i]);
+                    float fdx, fdy;
+                    ff->sample_raw(pos_x[i], pos_y[i], fdx, fdy);
+                    if (fdx == 0.0f && fdy == 0.0f) { // 目标不可达（隔墙/隔水）
+                        attack_target[i] = -1;
+                        if (goal_cell[i] >= 0) { // 恢复追击前的行军目标
+                            state[i] = U_MOVING;
+                            slot_x[i] = float(goal_cell[i] % grid_dim) * CELL_SIZE + CELL_SIZE * 0.5f;
+                            slot_y[i] = float(goal_cell[i] / grid_dim) * CELL_SIZE + CELL_SIZE * 0.5f;
+                        } else {
+                            state[i] = U_IDLE;
+                        }
+                        break;
+                    }
+                    unit_field[i] = ff;
+                }
                 break;
             }
 
@@ -1033,6 +1202,44 @@ void SimWorld::logic_pass(float p_dt) {
                     if (fdx != 0.0f || fdy != 0.0f) {
                         unit_field[i] = ff;
                     }
+                }
+                break;
+            }
+
+            case U_REPAIR: {
+                const int b = -2 - target_cell[i];
+                if (b < 0 || b >= int(b_cell.size()) || b_hp[b] <= 0.0f ||
+                        b_hp[b] >= building_max_hp(b_type[b])) {
+                    state[i] = U_IDLE; // 修完/被拆：收工
+                    target_cell[i] = -1;
+                    break;
+                }
+                const float half = float(building_footprint(b_type[b])) * CELL_SIZE * 0.5f;
+                const float bx = float(b_cell[b] % grid_dim) * CELL_SIZE + half;
+                const float by = float(b_cell[b] / grid_dim) * CELL_SIZE + half;
+                const float dx = bx - pos_x[i];
+                const float dy = by - pos_y[i];
+                const float reach = st.attack_range + UNIT_RADIUS + half;
+                if (dx * dx + dy * dy <= reach * reach) { // 贴近：修理
+                    slot_x[i] = pos_x[i];
+                    slot_y[i] = pos_y[i];
+                    b_hp[b] = std::min(building_max_hp(b_type[b]), b_hp[b] + 12.0f * p_dt);
+                    break;
+                }
+                slot_x[i] = bx; // 走过去（同攻城寻路：远走流场近直线）
+                slot_y[i] = by;
+                const int32_t cell = cell_of_pos(pos_x[i], pos_y[i]);
+                const int tx = b_cell[b] % grid_dim, ty = b_cell[b] / grid_dim;
+                if (std::max(std::abs(cell % grid_dim - tx), std::abs(cell / grid_dim - ty)) > 3) {
+                    const FlowField *ff = ensure_field(b_cell[b], faction[i]);
+                    float fdx, fdy;
+                    ff->sample_raw(pos_x[i], pos_y[i], fdx, fdy);
+                    if (fdx == 0.0f && fdy == 0.0f) {
+                        state[i] = U_IDLE; // 修不到（被围死）
+                        target_cell[i] = -1;
+                        break;
+                    }
+                    unit_field[i] = ff;
                 }
                 break;
             }
@@ -1161,7 +1368,8 @@ void SimWorld::move_range(int p_begin, int p_end, float p_dt) {
         const FlowField *ff = unit_field[i];
         float dx = 0.0f, dy = 0.0f;
         if (ff == nullptr) {
-            if (state[i] == U_MOVING || state[i] == U_ATTACK || state[i] == U_FLEE) { // 直线驶向槽位/追击点/家
+            if (state[i] == U_MOVING || state[i] == U_ATTACK || state[i] == U_FLEE ||
+                    state[i] == U_REPAIR) { // 直线驶向槽位/追击点/家/修理对象
                 const float sx = slot_x[i] - pos_x[i];
                 const float sy = slot_y[i] - pos_y[i];
                 const float d2 = sx * sx + sy * sy;
@@ -1321,6 +1529,12 @@ void SimWorld::tick(float p_dt) {
     if (field_cache_dirty || field_cache.size() > FIELD_CACHE_MAX) {
         field_cache.clear(); // tick 开头清理，pass 内指针不会悬空
         field_cache_dirty = false;
+    }
+    if (attack_events.size() > 8192) {
+        attack_events.clear(); // 渲染端不取（headless 长跑）时防止无限增长
+    }
+    if (building_events.size() > 1024) {
+        building_events.clear();
     }
     logic_pass(p_dt);
     pool->run(unit_count, [&](int b, int e) { move_range(b, e, p_dt); });
@@ -1599,7 +1813,11 @@ bool SimWorld::toggle_gate_at(Vector2 p_world_pos) {
         const int bx = b_cell[b] % grid_dim, by = b_cell[b] / grid_dim;
         if (cx >= bx && cx < bx + fp && cy >= by && cy < by + fp) {
             b_state[b] ^= 1;
-            field_cache_dirty = true; // 通行性变化，玩家侧流场需重算
+            // 门只影响玩家侧通行性：只失效阵营 0 的场（敌方视角门恒为墙）。
+            // tick 间调用，立即清除安全。
+            for (auto it = field_cache.begin(); it != field_cache.end();) {
+                it = ((it->first >> 32) == 0) ? field_cache.erase(it) : ++it;
+            }
             return true;
         }
     }
@@ -1832,6 +2050,10 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_building_state", "index"), &SimWorld::get_building_state);
     ClassDB::bind_method(D_METHOD("command_attack_building", "ids", "building"), &SimWorld::command_attack_building);
     ClassDB::bind_method(D_METHOD("command_garrison", "ids", "world_pos"), &SimWorld::command_garrison);
+    ClassDB::bind_method(D_METHOD("command_repair", "ids", "world_pos"), &SimWorld::command_repair);
+    ClassDB::bind_method(D_METHOD("despawn_unit", "id"), &SimWorld::despawn_unit);
+    ClassDB::bind_method(D_METHOD("get_unit_faction", "id"), &SimWorld::get_unit_faction);
+    ClassDB::bind_static_method("SimWorld", D_METHOD("unit_max_hp", "type"), &SimWorld::unit_max_hp);
     ClassDB::bind_method(D_METHOD("toggle_gate_at", "world_pos"), &SimWorld::toggle_gate_at);
     ClassDB::bind_method(D_METHOD("take_building_events"), &SimWorld::take_building_events);
     ClassDB::bind_method(D_METHOD("debug_damage_building", "index", "damage"), &SimWorld::debug_damage_building);

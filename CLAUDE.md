@@ -52,8 +52,10 @@ godot --headless --path game -s bench/bench_sim.gd
 
 - **存档版本**：改动任何序列化数组（SoA 字段/建筑字段）必须升 `SAVE_VERSION`
   （`sim_world.cpp`）并同步 save_state/load_state 两处，hash 视情况加新字段。
-- **数值表双份**：`src/sim_world.cpp` 的 STATS/COUNTER/FORM 表与
-  `game/scenes/main.gd` 的 UNIT_MAX_HP/BUILDINGS/TRAIN 常量必须手工保持同步。
+- **数值表**：单位血量上限/建筑造价/占地已由 C++ 绑定单源提供
+  （`SimWorld.unit_max_hp/building_cost/building_size`）；仍为双份的是
+  `main.gd` 的 BUILDINGS（名字/颜色）与 TRAIN（训练成本/所属建筑），
+  改 C++ 枚举或加兵种建筑时要同步。
 - 枚举（UnitType/BuildingType/Terrain/Formation）在 C++ 与 GDScript 间按数值对应，
   改枚举两边都要动。
 - godot-cpp pinned `godot-4.5-stable`，绑定用根目录 `extension_api_4.6.json`
@@ -74,8 +76,12 @@ godot --headless --path game -s bench/bench_sim.gd
 下一步：**可玩切片里程碑**（PLAN.md：发真人试玩，决定砍留）。
 攻城侧明确推迟：攻方登墙（攻城梯/塔）、火攻/火炮、城门修复、护城河。
 
-已知待办：资源枯竭地块视觉不变化（悬停状态行可见余量）；城门修复未做。
 真地形碰撞已实现（move/separate 按中心点判格 + 轴向滑动，开门放行己方；
 worker 线程只读 occupied/b_state，符合铁律 3）。
+追击/修理寻路：>1 格走流场、不可达放弃；尸体槽位按"最小连续块"复用
+（调用方依赖 spawn_units 返回 first+连续区间，复用规则纯派生自 alive[]，
+读档后一致）。枯竭森林退化草地（take_resource 内，发 terrain_events）。
+工人可修理受损建筑（右键，12HP/s）；废墟原地重建即可（占地已释放）。
+HUD/小地图在 `game/scenes/hud.gd`（GameHud），main.gd 只留世界与输入。
 完整设计数值（兵种/地形/政策/外交等全部表格）见 **`DESIGN.md`**——
 实现新系统前先查它；代码数值与其冲突时以代码 + bench 为准并回写 DESIGN.md。
