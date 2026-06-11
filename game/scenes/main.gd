@@ -477,7 +477,12 @@ func _unhandled_input(event: InputEvent) -> void:
 					if place_mode >= 0:
 						_exit_place_mode()
 					elif selected.size() > 0:
-						sim.command_gather(selected, get_global_mouse_position())
+						var pos := get_global_mouse_position()
+						var enemy: int = sim.get_unit_at(pos, 20.0, 1)
+						if enemy >= 0: # 点敌人 = 集火
+							sim.command_attack(selected, enemy)
+						else:
+							sim.command_gather(selected, pos)
 		elif event.button_index == MOUSE_BUTTON_LEFT and dragging:
 			dragging = false
 			var rect := _drag_rect()

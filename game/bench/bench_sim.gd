@@ -285,6 +285,24 @@ func _bench_combat() -> void:
 		wa.count_alive(0), wa.count_alive(1),
 		_check(wa.count_alive(1) <= 3, "ranged chip"),
 	])
+	# 士气：3 民兵 vs 9 土匪，弱势方目击队友阵亡应溃逃
+	var fled := [false, false]
+	for run in 2:
+		var map := GameMap.new()
+		map.generate(512, 2026)
+		var w := SimWorld.new()
+		w.setup(0, 16384.0, 1, 6)
+		w.set_map(map)
+		var p := Vector2(260, 260) * 32.0
+		w.spawn_units(1, 3, p - Vector2(60, 0), 0)
+		w.spawn_units(2, 9, p + Vector2(60, 0), 1)
+		for i in 600:
+			w.tick(0.1)
+			if w.count_state(6, 0) > 0: # U_FLEE
+				fled[run] = true
+	print("morale: outnumbered militia fled %s" % [
+		_check(fled[0] and fled[1], "morale break"),
+	])
 
 
 func _run_archer_sim() -> SimWorld:

@@ -29,6 +29,26 @@ static constexpr UnitStats STATS[UT_COUNT] = {
     { 50.0f, 10.0f, 200.0f, 1.5f, 220.0f }, // 弓箭手：远程
 };
 
+// 士气 → 战斗力修正（设计文档士气等级表）
+static inline float morale_mult(float p_m) {
+    if (p_m >= 90.0f) {
+        return 1.2f;
+    }
+    if (p_m >= 70.0f) {
+        return 1.1f;
+    }
+    if (p_m >= 50.0f) {
+        return 1.0f;
+    }
+    if (p_m >= 30.0f) {
+        return 0.85f;
+    }
+    if (p_m >= 10.0f) {
+        return 0.7f;
+    }
+    return 0.5f;
+}
+
 // 兵种克制系数 [攻击方][防守方]（设计文档克制表：轻步兵→弓兵 ×1.2，弓兵→轻步兵 ×1.1）
 static constexpr float COUNTER[UT_COUNT][UT_COUNT] = {
     { 1.0f, 1.0f, 1.0f, 1.0f }, // 工人
@@ -58,6 +78,9 @@ void SimWorld::resize_arrays(int p_count) {
     alive.resize(p_count, 1);
     hp.resize(p_count, STATS[UT_WORKER].max_hp);
     attack_target.resize(p_count, -1);
+    morale.resize(p_count, 60.0f);
+    home_x.resize(p_count, 0.0f);
+    home_y.resize(p_count, 0.0f);
 
     new_x.resize(p_count);
     new_y.resize(p_count);
@@ -163,10 +186,83 @@ int SimWorld::spawn_units(int p_type, int p_count, Vector2 p_world_pos, int p_fa
         alive[i] = 1;
         hp[i] = STATS[type].max_hp;
         attack_target[i] = -1;
+        morale[i] = 60.0f;
+        home_x[i] = p_world_pos.x;
+        home_y[i] = p_world_pos.y;
         prev_x[i] = pos_x[i];
         prev_y[i] = pos_y[i];
     }
     return first;
+}
+
+void SimWorld::command_attack(const PackedInt32Array &p_ids, int p_target_id) {
+    if (p_target_id < 0 || p_target_id >= unit_count || !alive[p_target_id]) {
+        return;
+    }
+    for (int k = 0; k < p_ids.size(); k++) {
+        const int i = p_ids[k];
+        if (i < 0 || i >= unit_count || state[i] == U_WANDER || state[i] == U_FLEE ||
+                faction[i] == faction[p_target_id]) {
+            continue;
+        }
+        if (STATS[u_type[i]].aggro_range <= 0.0f) { // 工人不会战斗：移动过去
+            state[i] = U_MOVING;
+            goal_cell[i] = cell_of_pos(pos_x[p_target_id], pos_y[p_target_id]);
+            slot_x[i] = pos_x[p_target_id];
+            slot_y[i] = pos_y[p_target_id];
+            continue;
+        }
+        state[i] = U_ATTACK;
+        attack_target[i] = p_target_id;
+        timer[i] = 0.0f;
+    }
+}
+
+int SimWorld::get_unit_at(Vector2 p_world_pos, float p_radius, int p_faction) const {
+    int best = -1;
+    float best_d2 = p_radius * p_radius;
+    for (int i = 0; i < unit_count; i++) {
+        if (!alive[i] || (p_faction >= 0 && faction[i] != p_faction)) {
+            continue;
+        }
+        const float dx = pos_x[i] - p_world_pos.x;
+        const float dy = pos_y[i] - p_world_pos.y;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best = i;
+        }
+    }
+    return best;
+}
+
+// 死亡的士气涟漪：200px 内友军 -8，敌军 +4（用上一 tick 网格，串行调用）
+void SimWorld::on_unit_killed(int p_victim) {
+    constexpr float RANGE = 200.0f;
+    const int cr = int(RANGE / CELL_SIZE) + 1;
+    const int cx = std::clamp(int(pos_x[p_victim] / CELL_SIZE), 0, grid_dim - 1);
+    const int cy = std::clamp(int(pos_y[p_victim] / CELL_SIZE), 0, grid_dim - 1);
+    for (int gy = std::max(0, cy - cr); gy <= std::min(grid_dim - 1, cy + cr); gy++) {
+        for (int gx = std::max(0, cx - cr); gx <= std::min(grid_dim - 1, cx + cr); gx++) {
+            const uint32_t cell = uint32_t(gy) * grid_dim + gx;
+            for (uint32_t e = cell_starts[cell]; e < cell_starts[cell + 1]; e++) {
+                const int32_t j = int32_t(cell_entries[e]);
+                if (!alive[j] || j == p_victim) {
+                    continue;
+                }
+                const float dx = pos_x[j] - pos_x[p_victim];
+                const float dy = pos_y[j] - pos_y[p_victim];
+                if (dx * dx + dy * dy > RANGE * RANGE) {
+                    continue;
+                }
+                if (faction[j] == faction[p_victim]) {
+                    morale[j] = std::max(0.0f, morale[j] - 8.0f);
+                } else {
+                    morale[j] = std::min(100.0f, morale[j] + 4.0f);
+                }
+            }
+        }
+    }
 }
 
 bool SimWorld::try_spend(int p_wood, int p_stone, int p_food) {
@@ -304,16 +400,57 @@ void SimWorld::logic_pass(float p_dt) {
         if (!alive[i]) {
             continue;
         }
-        // 自动索敌（错峰扫描，1/5 单位每 tick）
         const UnitStats &st = STATS[u_type[i]];
-        if (st.aggro_range > 0.0f && attack_target[i] < 0 &&
-                (state[i] == U_IDLE || state[i] == U_MOVING) &&
-                (tick_index + uint64_t(i)) % 5 == 0) {
-            const int32_t enemy = find_nearest_enemy(i, st.aggro_range);
-            if (enemy >= 0) {
-                attack_target[i] = enemy;
-                state[i] = U_ATTACK;
-                timer[i] = 0.0f;
+        // 士气：向基线 60 缓慢回归；崩溃检查
+        if (morale[i] < 60.0f) {
+            morale[i] = std::min(60.0f, morale[i] + 1.5f * p_dt);
+        } else if (morale[i] > 60.0f) {
+            morale[i] = std::max(60.0f, morale[i] - 0.5f * p_dt);
+        }
+        if (morale[i] < 20.0f && state[i] != U_FLEE && st.aggro_range > 0.0f) {
+            state[i] = U_FLEE; // 溃败：脱战逃向出生点
+            attack_target[i] = -1;
+        }
+        // 错峰扫描（1/5 单位每 tick）：索敌 + 局部兵力劣势士气压制
+        if (st.aggro_range > 0.0f && (tick_index + uint64_t(i)) % 5 == 0) {
+            if (attack_target[i] < 0 && (state[i] == U_IDLE || state[i] == U_MOVING)) {
+                const int32_t enemy = find_nearest_enemy(i, st.aggro_range);
+                if (enemy >= 0) {
+                    attack_target[i] = enemy;
+                    state[i] = U_ATTACK;
+                    timer[i] = 0.0f;
+                }
+            }
+            if (state[i] == U_ATTACK || state[i] == U_FLEE) {
+                // 周边 160px 敌我比 > 2:1 → 士气流失（设计：兵力劣势）
+                int allies = 0, enemies = 0;
+                const int cr = 6;
+                const int cx = std::clamp(int(pos_x[i] / CELL_SIZE), 0, grid_dim - 1);
+                const int cy = std::clamp(int(pos_y[i] / CELL_SIZE), 0, grid_dim - 1);
+                for (int gy = std::max(0, cy - cr); gy <= std::min(grid_dim - 1, cy + cr); gy++) {
+                    for (int gx = std::max(0, cx - cr); gx <= std::min(grid_dim - 1, cx + cr); gx++) {
+                        const uint32_t cell = uint32_t(gy) * grid_dim + gx;
+                        for (uint32_t e = cell_starts[cell]; e < cell_starts[cell + 1]; e++) {
+                            const int32_t j = int32_t(cell_entries[e]);
+                            if (!alive[j]) {
+                                continue;
+                            }
+                            const float ddx = pos_x[j] - pos_x[i];
+                            const float ddy = pos_y[j] - pos_y[i];
+                            if (ddx * ddx + ddy * ddy > 160.0f * 160.0f) {
+                                continue;
+                            }
+                            if (faction[j] == faction[i]) {
+                                allies++;
+                            } else {
+                                enemies++;
+                            }
+                        }
+                    }
+                }
+                if (enemies > allies * 2) {
+                    morale[i] = std::max(0.0f, morale[i] - 6.0f);
+                }
             }
         }
         switch (state[i]) {
@@ -427,18 +564,48 @@ void SimWorld::logic_pass(float p_dt) {
                     timer[i] -= p_dt;
                     if (timer[i] <= 0.0f) {
                         timer[i] = st.attack_interval;
-                        hp[t] -= st.damage * COUNTER[u_type[i]][u_type[t]];
+                        hp[t] -= st.damage * COUNTER[u_type[i]][u_type[t]] * morale_mult(morale[i]);
                         attack_events.push_back(i);
                         attack_events.push_back(t);
                         if (hp[t] <= 0.0f) {
                             hp[t] = 0.0f;
                             alive[t] = 0;
+                            on_unit_killed(t);
                         }
                     }
                     break;
                 }
                 slot_x[i] = pos_x[t]; // 追击点 → move_range 直线驶向
                 slot_y[i] = pos_y[t];
+                break;
+            }
+
+            case U_FLEE: {
+                if (morale[i] >= 40.0f) { // 恢复，重整
+                    state[i] = U_IDLE;
+                    break;
+                }
+                const float dx = home_x[i] - pos_x[i];
+                const float dy = home_y[i] - pos_y[i];
+                if (dx * dx + dy * dy < 400.0f) { // 到家：原地恢复
+                    slot_x[i] = pos_x[i]; // 停止移动
+                    slot_y[i] = pos_y[i];
+                    break;
+                }
+                const int32_t home = cell_of_pos(home_x[i], home_y[i]);
+                const int32_t cell = cell_of_pos(pos_x[i], pos_y[i]);
+                const int hx = home % grid_dim, hy = home / grid_dim;
+                const int ccx = cell % grid_dim, ccy = cell / grid_dim;
+                slot_x[i] = home_x[i];
+                slot_y[i] = home_y[i];
+                if (std::max(std::abs(ccx - hx), std::abs(ccy - hy)) > 3) {
+                    const FlowField *ff = ensure_field(home);
+                    float fdx, fdy;
+                    ff->sample_raw(pos_x[i], pos_y[i], fdx, fdy);
+                    if (fdx != 0.0f || fdy != 0.0f) {
+                        unit_field[i] = ff;
+                    }
+                }
                 break;
             }
         }
@@ -484,7 +651,7 @@ void SimWorld::move_range(int p_begin, int p_end, float p_dt) {
         const FlowField *ff = unit_field[i];
         float dx = 0.0f, dy = 0.0f;
         if (ff == nullptr) {
-            if (state[i] == U_MOVING || state[i] == U_ATTACK) { // 直线驶向槽位/追击点
+            if (state[i] == U_MOVING || state[i] == U_ATTACK || state[i] == U_FLEE) { // 直线驶向槽位/追击点/家
                 const float sx = slot_x[i] - pos_x[i];
                 const float sy = slot_y[i] - pos_y[i];
                 const float d2 = sx * sx + sy * sy;
@@ -697,6 +864,20 @@ int SimWorld::count_alive(int p_faction) const {
     return n;
 }
 
+int SimWorld::count_state(int p_state, int p_faction) const {
+    int n = 0;
+    for (int i = 0; i < unit_count; i++) {
+        if (alive[i] && faction[i] == p_faction && state[i] == p_state) {
+            n++;
+        }
+    }
+    return n;
+}
+
+float SimWorld::get_unit_morale(int p_id) const {
+    return (p_id >= 0 && p_id < unit_count) ? morale[p_id] : 0.0f;
+}
+
 int64_t SimWorld::get_stockpile(int p_type) const {
     return (p_type >= 0 && p_type < RES_COUNT) ? stockpile[p_type] : 0;
 }
@@ -822,7 +1003,7 @@ PackedInt32Array SimWorld::get_buildings() const {
 // 存档格式 v2：+ 状态机数组 + 库存 + 存储点。
 // 数据布局变更必须升版本号；golden 基线随逻辑变更重置（删 golden_hash.txt 重新初始化）。
 static constexpr uint32_t SAVE_MAGIC = 0x57564943; // "CIVW" LE
-static constexpr uint32_t SAVE_VERSION = 4; // v4: + 单位类型/阵营/HP/攻击目标
+static constexpr uint32_t SAVE_VERSION = 5; // v5: + 士气/出生点
 
 template <typename T>
 static void blob_write(PackedByteArray &r_out, const T *p_data, size_t p_count) {
@@ -872,6 +1053,9 @@ PackedByteArray SimWorld::save_state() const {
     blob_write(out, alive.data(), alive.size());
     blob_write(out, hp.data(), hp.size());
     blob_write(out, attack_target.data(), attack_target.size());
+    blob_write(out, morale.data(), morale.size());
+    blob_write(out, home_x.data(), home_x.size());
+    blob_write(out, home_y.data(), home_y.size());
     const int32_t n_buildings = int32_t(b_cell.size());
     blob_write(out, &n_buildings, 1);
     blob_write(out, b_type.data(), b_type.size());
@@ -918,7 +1102,10 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
             !blob_read(p_data, at, faction.data(), faction.size()) ||
             !blob_read(p_data, at, alive.data(), alive.size()) ||
             !blob_read(p_data, at, hp.data(), hp.size()) ||
-            !blob_read(p_data, at, attack_target.data(), attack_target.size())) {
+            !blob_read(p_data, at, attack_target.data(), attack_target.size()) ||
+            !blob_read(p_data, at, morale.data(), morale.size()) ||
+            !blob_read(p_data, at, home_x.data(), home_x.size()) ||
+            !blob_read(p_data, at, home_y.data(), home_y.size())) {
         return false;
     }
     int32_t n_buildings = 0;
@@ -956,6 +1143,7 @@ int64_t SimWorld::state_hash() const {
     mix_bytes(stockpile, sizeof(stockpile));
     mix_bytes(hp.data(), hp.size() * 4);
     mix_bytes(alive.data(), alive.size());
+    mix_bytes(morale.data(), morale.size() * 4);
     mix_bytes(b_type.data(), b_type.size());
     mix_bytes(b_cell.data(), b_cell.size() * 4);
     return int64_t(h);
@@ -974,6 +1162,10 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("is_unit_alive", "id"), &SimWorld::is_unit_alive);
     ClassDB::bind_method(D_METHOD("count_alive", "faction"), &SimWorld::count_alive);
     ClassDB::bind_method(D_METHOD("take_attack_events"), &SimWorld::take_attack_events);
+    ClassDB::bind_method(D_METHOD("command_attack", "ids", "target_id"), &SimWorld::command_attack);
+    ClassDB::bind_method(D_METHOD("get_unit_at", "world_pos", "radius", "faction"), &SimWorld::get_unit_at);
+    ClassDB::bind_method(D_METHOD("count_state", "state", "faction"), &SimWorld::count_state);
+    ClassDB::bind_method(D_METHOD("get_unit_morale", "id"), &SimWorld::get_unit_morale);
     ClassDB::bind_method(D_METHOD("command_move", "ids", "world_pos"), &SimWorld::command_move);
     ClassDB::bind_method(D_METHOD("command_gather", "ids", "world_pos"), &SimWorld::command_gather);
     ClassDB::bind_method(D_METHOD("get_units_in_rect", "min", "max"), &SimWorld::get_units_in_rect);

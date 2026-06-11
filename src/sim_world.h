@@ -24,6 +24,7 @@ enum UnitState : uint8_t {
     U_GATHER = 3, // 移向 target_cell 资源格并采集
     U_RETURN = 4, // 满载运回最近有效存储点
     U_ATTACK = 5, // 追击 attack_target 并近战
+    U_FLEE = 6, // 士气崩溃，逃向出生点，恢复后转 IDLE
 };
 
 enum UnitType : uint8_t {
@@ -89,6 +90,8 @@ class SimWorld : public godot::RefCounted {
     std::vector<uint8_t> alive;
     std::vector<float> hp;
     std::vector<int32_t> attack_target; // 单位 id，-1 = 无
+    std::vector<float> morale; // 0-100，基线 60
+    std::vector<float> home_x, home_y; // 出生点（溃逃目的地）
 
     // 本帧攻击事件（渲染特效用，瞬态不序列化）：[attacker, target, ...]
     godot::PackedInt32Array attack_events;
@@ -129,6 +132,7 @@ class SimWorld : public godot::RefCounted {
     int32_t nearest_dropoff(int p_res_type, int32_t p_from_cell) const;
     void mark_occupancy(int p_b_index, uint8_t p_value);
     int32_t find_nearest_enemy(int p_unit, float p_range) const; // 用上一 tick 的空间网格
+    void on_unit_killed(int p_victim); // 周边士气结算
 
 public:
     void setup(int p_count, float p_world_size, int p_seed, int p_threads);
@@ -141,6 +145,8 @@ public:
     bool try_spend(int p_wood, int p_stone, int p_food); // 资源足够则扣除
     void command_move(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_gather(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
+    void command_attack(const godot::PackedInt32Array &p_ids, int p_target_id);
+    int get_unit_at(godot::Vector2 p_world_pos, float p_radius, int p_faction) const; // faction -1 = 任意
 
     bool can_place_building(int p_type, godot::Vector2 p_world_pos) const;
     bool place_building(int p_type, godot::Vector2 p_world_pos);
@@ -155,6 +161,8 @@ public:
     float get_unit_hp(int p_id) const;
     bool is_unit_alive(int p_id) const;
     int count_alive(int p_faction) const;
+    int count_state(int p_state, int p_faction) const;
+    float get_unit_morale(int p_id) const;
     int64_t get_stockpile(int p_type) const;
     godot::PackedInt32Array take_attack_events(); // 取走并清空
 
