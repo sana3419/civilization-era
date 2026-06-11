@@ -1,0 +1,66 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gdextension:
+    name: ${{ matrix.cfg.name }} / ${{ matrix.target }}
+    runs-on: ${{ matrix.cfg.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [template_debug, template_release]
+        cfg:
+          - { name: linux-x86_64, os: ubuntu-24.04, platform: linux, arch: x86_64, mingw: false }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, platform: linux, arch: arm64, mingw: false }
+          - { name: windows-x86_64, os: ubuntu-24.04, platform: windows, arch: x86_64, mingw: true }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          lfs: true
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y scons ccache
+          if [ "${{ matrix.cfg.mingw }}" = "true" ]; then
+            sudo apt-get install -y mingw-w64
+            sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+            sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          fi
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ matrix.cfg.name }}-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.cfg.name }}-${{ matrix.target }}-
+
+      - name: Build
+        run: |
+          export PATH=/usr/lib/ccache:$PATH
+          scons platform=${{ matrix.cfg.platform }} arch=${{ matrix.cfg.arch }} \
+            target=${{ matrix.target }} use_mingw=${{ matrix.cfg.mingw }} \
+            -j$(nproc)
+
+      - name: Headless smoke test (native linux only)
+        if: matrix.cfg.platform == 'linux' && matrix.cfg.arch == 'x86_64' && matrix.target == 'template_debug'
+        run: |
+          curl -sL -o godot.zip https://github.com/godotengine/godot-builds/releases/download/4.6-stable/Godot_v4.6-stable_linux.x86_64.zip
+          unzip -q godot.zip && chmod +x Godot_v4.6-stable_linux.x86_64
+          ./Godot_v4.6-stable_linux.x86_64 --headless --path game -s bench/bench_sim.gd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lib-${{ matrix.cfg.name }}-${{ matrix.target }}
+          path: |
+            game/bin/*.so
+            game/bin/*.dll
+          if-no-files-found: error
+
+# TODO（有正式 export_presets.cfg 后）：追加 export 任务，用 Godot headless
+# 导出 Windows x86_64 整包作为里程碑冒烟包。

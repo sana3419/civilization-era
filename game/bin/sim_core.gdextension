@@ -1,0 +1,14 @@
+[configuration]
+
+entry_symbol = "sim_core_init"
+compatibility_minimum = "4.5"
+reloadable = true
+
+[libraries]
+
+linux.debug.arm64 = "res://bin/libsim_core.linux.template_debug.arm64.so"
+linux.release.arm64 = "res://bin/libsim_core.linux.template_release.arm64.so"
+linux.debug.x86_64 = "res://bin/libsim_core.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "res://bin/libsim_core.linux.template_release.x86_64.so"
+windows.debug.x86_64 = "res://bin/libsim_core.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "res://bin/libsim_core.windows.template_release.x86_64.dll"

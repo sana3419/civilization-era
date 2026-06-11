@@ -1,0 +1,15 @@
+# Godot
+game/.godot/
+*.tmp
+
+# 构建产物（动态库由 CI/本地编译产出，不入库）
+game/bin/*.so
+game/bin/*.dll
+game/bin/*.dylib
+
+# SCons
+.sconsign.dblite
+*.o
+*.obj
+*.os
+__pycache__/
