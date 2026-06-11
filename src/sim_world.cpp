@@ -26,6 +26,15 @@ static constexpr UnitStats STATS[UT_COUNT] = {
     { 100.0f, 2.0f, 20.0f, 1.0f, 0.0f }, // 工人：不主动索敌
     { 60.0f, 8.0f, 20.0f, 1.0f, 160.0f }, // 民兵
     { 60.0f, 8.0f, 20.0f, 1.0f, 160.0f }, // 土匪
+    { 50.0f, 10.0f, 200.0f, 1.5f, 220.0f }, // 弓箭手：远程
+};
+
+// 兵种克制系数 [攻击方][防守方]（设计文档克制表：轻步兵→弓兵 ×1.2，弓兵→轻步兵 ×1.1）
+static constexpr float COUNTER[UT_COUNT][UT_COUNT] = {
+    { 1.0f, 1.0f, 1.0f, 1.0f }, // 工人
+    { 1.0f, 1.0f, 1.0f, 1.2f }, // 民兵
+    { 1.0f, 1.0f, 1.0f, 1.2f }, // 土匪
+    { 1.1f, 1.1f, 1.1f, 1.0f }, // 弓手
 };
 
 void SimWorld::resize_arrays(int p_count) {
@@ -414,11 +423,13 @@ void SimWorld::logic_pass(float p_dt) {
                 const float dx = pos_x[t] - pos_x[i];
                 const float dy = pos_y[t] - pos_y[i];
                 const float reach = st.attack_range + UNIT_RADIUS * 2.0f;
-                if (dx * dx + dy * dy <= reach * reach) { // 近战范围内：站定输出
+                if (dx * dx + dy * dy <= reach * reach) { // 攻击范围内：站定输出
                     timer[i] -= p_dt;
                     if (timer[i] <= 0.0f) {
                         timer[i] = st.attack_interval;
-                        hp[t] -= st.damage;
+                        hp[t] -= st.damage * COUNTER[u_type[i]][u_type[t]];
+                        attack_events.push_back(i);
+                        attack_events.push_back(t);
                         if (hp[t] <= 0.0f) {
                             hp[t] = 0.0f;
                             alive[t] = 0;
@@ -670,6 +681,12 @@ bool SimWorld::is_unit_alive(int p_id) const {
     return p_id >= 0 && p_id < unit_count && alive[p_id];
 }
 
+PackedInt32Array SimWorld::take_attack_events() {
+    PackedInt32Array out = attack_events;
+    attack_events.clear();
+    return out;
+}
+
 int SimWorld::count_alive(int p_faction) const {
     int n = 0;
     for (int i = 0; i < unit_count; i++) {
@@ -700,6 +717,8 @@ Vector2i SimWorld::building_cost(int p_type) { // (木材, 石料)
             return Vector2i(30, 10);
         case B_BARRACKS:
             return Vector2i(30, 20);
+        case B_ARCHERY:
+            return Vector2i(25, 10);
         default: // 营地（初始建筑）
             return Vector2i(0, 0);
     }
@@ -954,6 +973,7 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_unit_hp", "id"), &SimWorld::get_unit_hp);
     ClassDB::bind_method(D_METHOD("is_unit_alive", "id"), &SimWorld::is_unit_alive);
     ClassDB::bind_method(D_METHOD("count_alive", "faction"), &SimWorld::count_alive);
+    ClassDB::bind_method(D_METHOD("take_attack_events"), &SimWorld::take_attack_events);
     ClassDB::bind_method(D_METHOD("command_move", "ids", "world_pos"), &SimWorld::command_move);
     ClassDB::bind_method(D_METHOD("command_gather", "ids", "world_pos"), &SimWorld::command_gather);
     ClassDB::bind_method(D_METHOD("get_units_in_rect", "min", "max"), &SimWorld::get_units_in_rect);

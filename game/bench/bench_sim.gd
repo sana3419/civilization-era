@@ -278,6 +278,27 @@ func _bench_combat() -> void:
 		_check(p_alive == 0 or b_alive == 0, "combat resolved"),
 		_check(w1.state_hash() == w2.state_hash(), "combat determinism"),
 	])
+	# 远程价值 = 贴脸前的免费输出窗口；对等数量近战仍应占优（设计克制表如此）。
+	# 断言：弓手在被歼前至少换掉 2 个土匪（射程消耗成立）
+	var wa := _run_archer_sim()
+	print("combat archers 5v5: archers %d vs bandit %d | first-strike trade %s" % [
+		wa.count_alive(0), wa.count_alive(1),
+		_check(wa.count_alive(1) <= 3, "ranged chip"),
+	])
+
+
+func _run_archer_sim() -> SimWorld:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var p := Vector2(260, 260) * 32.0
+	w.spawn_units(3, 5, p - Vector2(100, 0), 0) # 5 弓手
+	w.spawn_units(2, 5, p + Vector2(100, 0), 1) # 5 土匪
+	for i in 900:
+		w.tick(0.1)
+	return w
 
 
 func _bench_golden() -> void:

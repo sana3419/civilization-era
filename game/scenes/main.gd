@@ -24,9 +24,14 @@ const BUILDINGS := [
 	{ "name": "房屋", "color": Color("a87850") },
 	{ "name": "仓库", "color": Color("7a5a8a") },
 	{ "name": "兵营", "color": Color("8a3a3a") },
+	{ "name": "射箭场", "color": Color("3a6a5a") },
 ]
-const MILITIA_COST := { "wood": 10, "food": 20 }
-const UNIT_MAX_HP := [100.0, 60.0, 60.0] # 与 src/sim_world.h STATS 对应
+# 训练表：单位类型 → 所需建筑/成本（与 src/sim_world.h 对应）
+const TRAIN := [
+	{ "type": 1, "name": "民兵", "building": 6, "wood": 10, "food": 20 },
+	{ "type": 3, "name": "弓手", "building": 7, "wood": 15, "food": 15 },
+]
+const UNIT_MAX_HP := [100.0, 60.0, 60.0, 50.0] # 与 src/sim_world.h STATS 对应
 
 var map: GameMap
 var sim: SimWorld
@@ -45,6 +50,7 @@ var minimap := Control.new()
 var minimap_base: ImageTexture
 var place_mode := -1 # 建造放置模式：建筑类型，-1 = 关闭
 var bandit_pos := Vector2.ZERO
+var attack_fx := [] # [{from, to, ttl}]
 var ghost := ColorRect.new()
 var shot_timer := 0.0
 
@@ -200,11 +206,17 @@ func _sync_unit_mesh() -> void:
 
 
 func _make_unit_atlas() -> ImageTexture:
-	# 3 行 × 6 帧：工人（蓝）/ 民兵（银甲红缨）/ 土匪（暗红）
-	var body := [Color(0.25, 0.45, 0.9), Color(0.7, 0.7, 0.78), Color(0.55, 0.15, 0.15)]
-	var head := [Color(0.95, 0.8, 0.6), Color(0.85, 0.2, 0.2), Color(0.3, 0.25, 0.2)]
-	var img := Image.create(16 * 6, 16 * 3, false, Image.FORMAT_RGBA8)
-	for row in 3:
+	# 4 行 × 6 帧：工人（蓝）/ 民兵（银甲红缨）/ 土匪（暗红）/ 弓手（绿帽）
+	var body := [
+		Color(0.25, 0.45, 0.9), Color(0.7, 0.7, 0.78),
+		Color(0.55, 0.15, 0.15), Color(0.5, 0.65, 0.35),
+	]
+	var head := [
+		Color(0.95, 0.8, 0.6), Color(0.85, 0.2, 0.2),
+		Color(0.3, 0.25, 0.2), Color(0.2, 0.5, 0.25),
+	]
+	var img := Image.create(16 * 6, 16 * 4, false, Image.FORMAT_RGBA8)
+	for row in 4:
 		for f in 6:
 			var c: Color = body[row].lightened(0.06 * (f % 3))
 			img.fill_rect(Rect2i(f * 16 + 3, row * 16 + 3, 10, 10), c)
@@ -226,7 +238,7 @@ void vertex() {
 void fragment() {
 	float frame = floor(inst_custom.x);
 	float row = floor(inst_custom.z); // 单位类型 → 图集行
-	vec2 uv = vec2((UV.x + frame) / 6.0, (UV.y + row) / 3.0);
+	vec2 uv = vec2((UV.x + frame) / 6.0, (UV.y + row) / 4.0);
 	COLOR = texture(TEXTURE, uv);
 	if (inst_custom.y > 0.0) {
 		COLOR.rgb = mix(COLOR.rgb, vec3(1.0, 0.85, 0.2), 0.45);
@@ -269,28 +281,29 @@ func _build_hud() -> void:
 		btn.add_theme_font_size_override("font_size", 14)
 		btn.pressed.connect(_enter_place_mode.bind(t))
 		hbox.add_child(btn)
-	var train := Button.new()
-	train.text = "训练民兵\n%d木 %d食" % [MILITIA_COST["wood"], MILITIA_COST["food"]]
-	train.add_theme_font_size_override("font_size", 14)
-	train.pressed.connect(_train_militia)
-	hbox.add_child(train)
+	for t in TRAIN:
+		var train := Button.new()
+		train.text = "训练%s\n%d木 %d食" % [t["name"], t["wood"], t["food"]]
+		train.add_theme_font_size_override("font_size", 14)
+		train.pressed.connect(_train_unit.bind(t))
+		hbox.add_child(train)
 	bar.add_child(hbox)
 	layer.add_child(bar)
 
 
-func _train_militia() -> void:
+func _train_unit(t: Dictionary) -> void:
 	var flat := sim.get_buildings()
 	for b in range(flat.size() / 2):
-		if flat[b * 2] == 6: # 兵营
-			if sim.try_spend(MILITIA_COST["wood"], 0, MILITIA_COST["food"]):
+		if flat[b * 2] == t["building"]:
+			if sim.try_spend(t["wood"], 0, t["food"]):
 				var cell := flat[b * 2 + 1]
 				var pos := Vector2(cell % MAP_DIM, cell / MAP_DIM) * TILE + Vector2(TILE, TILE * 3)
-				sim.spawn_units(1, 1, pos, 0)
+				sim.spawn_units(t["type"], 1, pos, 0)
 				_sync_unit_mesh()
 			else:
 				info_label.text = "资源不足"
 			return
-	info_label.text = "需要先建兵营"
+	info_label.text = "需要先建%s" % BUILDINGS[t["building"]]["name"]
 
 
 func _build_minimap() -> void:
@@ -373,6 +386,15 @@ func _process(delta: float) -> void:
 	if unit_mm.instance_count > 0:
 		RenderingServer.multimesh_set_buffer(unit_mm.get_rid(), sim.get_render_buffer())
 
+	# 攻击特效：取本帧事件画箭线/挥击线，0.25 秒淡出
+	var events := sim.take_attack_events()
+	for e in range(0, events.size(), 2):
+		var pair := sim.get_unit_positions(PackedInt32Array([events[e], events[e + 1]]))
+		attack_fx.append({ "from": pair[0], "to": pair[1], "ttl": 0.25 })
+	for fx in attack_fx:
+		fx["ttl"] -= delta
+	attack_fx = attack_fx.filter(func(fx): return fx["ttl"] > 0.0)
+
 	if place_mode >= 0: # 放置幽灵跟随 + 合法性着色
 		var cell := Vector2i(get_global_mouse_position() / TILE)
 		ghost.position = Vector2(cell) * TILE
@@ -382,8 +404,9 @@ func _process(delta: float) -> void:
 	res_label.text = "木材 %d  石料 %d  食物 %d" % [
 		sim.get_stockpile(0), sim.get_stockpile(1), sim.get_stockpile(2),
 	]
-	info_label.text = "已选工人 %d / %d   FPS %d" % [
-		selected.size(), sim.get_unit_count(), Engine.get_frames_per_second(),
+	info_label.text = "已选 %d  兵力 %d  敌人 %d   FPS %d" % [
+		selected.size(), sim.count_alive(0), sim.count_alive(1),
+		Engine.get_frames_per_second(),
 	]
 	queue_redraw()
 	minimap.queue_redraw()
@@ -405,6 +428,9 @@ func _process(delta: float) -> void:
 
 
 func _draw() -> void:
+	for fx in attack_fx:
+		var a: float = fx["ttl"] / 0.25
+		draw_line(fx["from"], fx["to"], Color(1.0, 0.9, 0.4, a), 1.5)
 	if selected.size() > 0:
 		var pts := sim.get_unit_positions(selected)
 		for k in selected.size():

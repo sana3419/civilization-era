@@ -30,7 +30,8 @@ enum UnitType : uint8_t {
     UT_WORKER = 0,
     UT_MILITIA = 1, // 民兵
     UT_BANDIT = 2, // 土匪
-    UT_COUNT = 3,
+    UT_ARCHER = 3, // 弓箭手（远程）
+    UT_COUNT = 4,
 };
 
 struct UnitStats {
@@ -49,7 +50,8 @@ enum BuildingType : uint8_t {
     B_HOUSE = 4, // 房屋（人口，暂占位）
     B_STOREHOUSE = 5, // 仓库：万能存储点
     B_BARRACKS = 6, // 兵营：训练民兵
-    B_COUNT = 7,
+    B_ARCHERY = 7, // 射箭场：训练弓箭手
+    B_COUNT = 8,
 };
 
 // 模拟世界：SoA、确定性、串行状态机 + 并行移动/分离。
@@ -87,6 +89,9 @@ class SimWorld : public godot::RefCounted {
     std::vector<uint8_t> alive;
     std::vector<float> hp;
     std::vector<int32_t> attack_target; // 单位 id，-1 = 无
+
+    // 本帧攻击事件（渲染特效用，瞬态不序列化）：[attacker, target, ...]
+    godot::PackedInt32Array attack_events;
 
     // 建筑（序列化范围）：2×2 占地，锚点为左上格
     std::vector<uint8_t> b_type;
@@ -151,6 +156,7 @@ public:
     bool is_unit_alive(int p_id) const;
     int count_alive(int p_faction) const;
     int64_t get_stockpile(int p_type) const;
+    godot::PackedInt32Array take_attack_events(); // 取走并清空
 
     void tick(float p_dt);
     void write_render_buffer(float p_alpha); // p_alpha: 上 tick→本 tick 插值系数
