@@ -33,8 +33,9 @@ const TRAIN := [
 	{ "type": 1, "name": "民兵", "building": 6, "wood": 10, "food": 20 },
 	{ "type": 3, "name": "弓手", "building": 7, "wood": 15, "food": 15 },
 	{ "type": 4, "name": "骑兵", "building": 8, "wood": 30, "food": 30 },
+	{ "type": 5, "name": "长枪兵", "building": 6, "wood": 20, "food": 25 },
 ]
-const UNIT_MAX_HP := [100.0, 60.0, 60.0, 50.0, 80.0] # 与 src/sim_world.h STATS 对应
+const UNIT_MAX_HP := [100.0, 60.0, 60.0, 50.0, 80.0, 100.0] # 与 src/sim_world.h STATS 对应
 const RAID_INTERVAL := 90.0 # 土匪袭扰间隔（模拟秒）
 const FORMATION_NAMES := ["无阵型", "横线阵", "纵队", "方阵", "锥形阵", "盾墙", "圆阵", "散兵线", "新月阵"]
 
@@ -212,19 +213,19 @@ func _sync_unit_mesh() -> void:
 
 
 func _make_unit_atlas() -> ImageTexture:
-	# 5 行 × 6 帧：工人（蓝）/ 民兵（银甲红缨）/ 土匪（暗红）/ 弓手（绿帽）/ 骑兵（棕鬃）
+	# 6 行 × 6 帧：工人（蓝）/ 民兵（银甲红缨）/ 土匪（暗红）/ 弓手（绿帽）/ 骑兵（棕鬃）/ 长枪兵（铁灰金缨）
 	var body := [
 		Color(0.25, 0.45, 0.9), Color(0.7, 0.7, 0.78),
 		Color(0.55, 0.15, 0.15), Color(0.5, 0.65, 0.35),
-		Color(0.6, 0.42, 0.2),
+		Color(0.6, 0.42, 0.2), Color(0.45, 0.5, 0.58),
 	]
 	var head := [
 		Color(0.95, 0.8, 0.6), Color(0.85, 0.2, 0.2),
 		Color(0.3, 0.25, 0.2), Color(0.2, 0.5, 0.25),
-		Color(0.35, 0.22, 0.1),
+		Color(0.35, 0.22, 0.1), Color(0.85, 0.7, 0.2),
 	]
-	var img := Image.create(16 * 6, 16 * 5, false, Image.FORMAT_RGBA8)
-	for row in 5:
+	var img := Image.create(16 * 6, 16 * 6, false, Image.FORMAT_RGBA8)
+	for row in 6:
 		for f in 6:
 			var c: Color = body[row].lightened(0.06 * (f % 3))
 			img.fill_rect(Rect2i(f * 16 + 3, row * 16 + 3, 10, 10), c)
@@ -246,7 +247,7 @@ void vertex() {
 void fragment() {
 	float frame = floor(inst_custom.x);
 	float row = floor(inst_custom.z); // 单位类型 → 图集行
-	vec2 uv = vec2((UV.x + frame) / 6.0, (UV.y + row) / 5.0);
+	vec2 uv = vec2((UV.x + frame) / 6.0, (UV.y + row) / 6.0);
 	COLOR = texture(TEXTURE, uv);
 	if (inst_custom.y > 0.0) {
 		COLOR.rgb = mix(COLOR.rgb, vec3(1.0, 0.85, 0.2), 0.45);

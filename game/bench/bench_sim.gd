@@ -320,6 +320,12 @@ func _bench_combat() -> void:
 	print("tower defense: bandits remaining %d | %s" % [
 		wt.count_alive(1), _check(wt.count_alive(1) == 0, "tower kills"),
 	])
+	# 长枪兵：4 长枪（克骑 ×1.5，骑→枪 ×0.7）应顶住 4 骑兵冲锋并获胜
+	var wp := _run_spearman_sim()
+	print("spearman anti-cavalry 4v4: spearmen %d vs cavalry %d | %s" % [
+		wp.count_alive(0), wp.count_alive(1),
+		_check(wp.count_alive(1) == 0 and wp.count_alive(0) >= 2, "spear wall"),
+	])
 
 
 func _run_cavalry_sim() -> SimWorld:
@@ -332,6 +338,21 @@ func _run_cavalry_sim() -> SimWorld:
 	var first := w.spawn_units(4, 4, p - Vector2(120, 0), 0) # 拉开距离起冲，积累动量
 	w.spawn_units(2, 5, p + Vector2(100, 0), 1)
 	w.command_move(PackedInt32Array(range(first, first + 4)), p + Vector2(100, 0))
+	for i in 900:
+		w.tick(0.1)
+	return w
+
+
+func _run_spearman_sim() -> SimWorld:
+	var map := GameMap.new()
+	map.generate(512, 2026)
+	var w := SimWorld.new()
+	w.setup(0, 16384.0, 1, 6)
+	w.set_map(map)
+	var p := _find_battlefield(map)
+	w.spawn_units(5, 4, p - Vector2(100, 0), 0) # 4 长枪兵原地接敌
+	var first := w.spawn_units(4, 4, p + Vector2(120, 0), 1)
+	w.command_move(PackedInt32Array(range(first, first + 4)), p - Vector2(100, 0)) # 骑兵带动量冲入
 	for i in 900:
 		w.tick(0.1)
 	return w

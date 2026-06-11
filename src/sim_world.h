@@ -33,7 +33,8 @@ enum UnitType : uint8_t {
     UT_BANDIT = 2, // 土匪
     UT_ARCHER = 3, // 弓箭手（远程）
     UT_CAVALRY = 4, // 轻骑兵
-    UT_COUNT = 5,
+    UT_SPEARMAN = 5, // 长枪兵（反骑兵）
+    UT_COUNT = 6,
 };
 
 struct UnitStats {
