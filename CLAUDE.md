@@ -38,7 +38,8 @@ godot --headless --path game -s bench/bench_sim.gd
 3. **并行规则**：worker 线程只允许"读共享旧状态 + 写本单位自己的槽位"
    （见 `move_range`/`separate_range`）。任何跨单位写（伤害、士气、入库、索敌）
    必须放在 `logic_pass`（串行，按单位序号顺序）。
-4. 索敌/士气扫描用**上一 tick 的空间网格**（`build_grid` 在 logic_pass 之后跑）。
+4. 索敌/士气扫描用**上一 tick 末位置的空间网格**（`build_grid` 在 tick 开头跑，
+   从当前位置构建——这样读档后能逐位重建，存读档续跑不分歧）。
 5. 模拟内不用 `Math.random`/时间源；RNG 是每单位 xorshift（`rng_state`）。
 
 ## Golden 回归工作流
@@ -78,7 +79,7 @@ godot --headless --path game -s bench/bench_sim.gd
 确定性 P0（读档网格重建/枯竭流场失效）与"工人球"士气漏洞等（提交历史详述）。
 
 下一步：**发真人试玩**（PLAN.md 切片决策点：不好玩 → 砍系统重排）。
-攻城侧明确推迟：攻方登墙（攻城梯/塔）、火攻/火炮、城门修复、护城河。
+攻城侧明确推迟：攻方登墙（攻城梯/塔）、火攻/火炮、护城河。
 
 真地形碰撞已实现（move/separate 按中心点判格 + 轴向滑动，开门放行己方；
 worker 线程只读 occupied/b_state，符合铁律 3）。
