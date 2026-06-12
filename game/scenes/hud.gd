@@ -198,6 +198,41 @@ func _draw_minimap() -> void:
 	minimap.draw_rect(r, Color(1, 1, 1, 0.8), false, 1.0)
 
 
+var game_over_panel: CenterContainer
+
+
+func show_game_over(win: bool, detail: String) -> void:
+	if game_over_panel != null:
+		game_over_panel.queue_free()
+	game_over_panel = CenterContainer.new()
+	game_over_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+	var panel := PanelContainer.new()
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 12)
+	var title := Label.new()
+	title.text = "🏆 匪营已破——胜利！" if win else "💀 营地陷落——战败"
+	title.add_theme_font_size_override("font_size", 42)
+	var stats := Label.new()
+	stats.text = detail
+	stats.add_theme_font_size_override("font_size", 20)
+	var hint := Label.new()
+	hint.text = "按 R 重新开始"
+	hint.add_theme_font_size_override("font_size", 18)
+	hint.modulate = Color(1, 1, 1, 0.7)
+	vbox.add_child(title)
+	vbox.add_child(stats)
+	vbox.add_child(hint)
+	panel.add_child(vbox)
+	game_over_panel.add_child(panel)
+	add_child(game_over_panel)
+
+
+func hide_game_over() -> void:
+	if game_over_panel != null:
+		game_over_panel.queue_free()
+		game_over_panel = null
+
+
 func _minimap_input(event: InputEvent) -> void:
 	var mb := event as InputEventMouseButton
 	var mm := event as InputEventMouseMotion

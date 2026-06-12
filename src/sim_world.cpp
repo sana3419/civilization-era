@@ -88,6 +88,10 @@ static float siege_mult(uint8_t p_unit, uint8_t p_btype) {
     return NORMAL[col];
 }
 
+float SimWorld::building_max_hp_of(int p_type) {
+    return (p_type >= 0 && p_type < B_COUNT) ? building_max_hp(uint8_t(p_type)) : 0.0f;
+}
+
 int SimWorld::building_footprint(int p_type) {
     return (is_wall(uint8_t(p_type)) || is_gate(uint8_t(p_type))) ? 1 : 2;
 }
@@ -2138,6 +2142,7 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("despawn_unit", "id"), &SimWorld::despawn_unit);
     ClassDB::bind_method(D_METHOD("get_unit_faction", "id"), &SimWorld::get_unit_faction);
     ClassDB::bind_static_method("SimWorld", D_METHOD("unit_max_hp", "type"), &SimWorld::unit_max_hp);
+    ClassDB::bind_static_method("SimWorld", D_METHOD("building_max_hp", "type"), &SimWorld::building_max_hp_of);
     ClassDB::bind_method(D_METHOD("toggle_gate_at", "world_pos"), &SimWorld::toggle_gate_at);
     ClassDB::bind_method(D_METHOD("take_building_events"), &SimWorld::take_building_events);
     ClassDB::bind_method(D_METHOD("debug_damage_building", "index", "damage"), &SimWorld::debug_damage_building);

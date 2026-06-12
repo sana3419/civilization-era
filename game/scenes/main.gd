@@ -66,6 +66,10 @@ var bandit_pos := Vector2.ZERO
 var attack_fx := [] # [{from, to, ttl}]
 var raid_timer := 150.0 # 首波缓 60s：实测最快民兵 ~150s，90s 接敌是无解窗口
 var raid_count := 0
+var paused := false
+var game_over := "" # ""=进行中 / "win" / "lose"
+var sim_time := 0.0
+var bandits_spawned := 0
 var terrain_layer: TileMapLayer # 枯竭地块刷新用
 var raid_units := {} # 袭扰单位 id → 连续空闲检查次数（收尾 AI 用）
 var raid_ai_timer := 0.0
@@ -168,7 +172,9 @@ func _spawn_bandit_camp(camp_cell: Vector2i) -> void:
 						ok = false
 			if ok:
 				bandit_pos = Vector2(c) * TILE + Vector2(16, 16)
-				sim.spawn_units(2, 5, bandit_pos, 1)
+				# 12 守卫 = 匪营的"血量"：清空守卫并兵临其址即胜利（给循环一个出口）
+				sim.spawn_units(2, 12, bandit_pos, 1)
+				bandits_spawned += 12
 				return
 
 
@@ -302,12 +308,45 @@ void fragment() {
 	return mat
 
 
-# 袭扰收尾：打完仗发呆的土匪撤回匪营并消失（防止长局堆积站桩单位）
+# 胜利 = 匪营无活匪驻守（300px 内无 faction1）且玩家兵临其址（160px 内有己方单位）。
+# 按物理占领判定而非守卫 id 清单：尸体槽位复用后 id 不可靠
+func _check_victory() -> void:
+	if game_over != "" or bandit_pos == Vector2.ZERO:
+		return
+	var ids := PackedInt32Array(range(sim.get_unit_count()))
+	var pts := sim.get_unit_positions(ids)
+	var occupier := false
+	for id in ids:
+		if not sim.is_unit_alive(id):
+			continue
+		if sim.get_unit_faction(id) == 1:
+			if pts[id].distance_to(bandit_pos) < 300.0:
+				return # 匪营还有驻守/援军
+		elif pts[id].distance_to(bandit_pos) < 160.0:
+			occupier = true
+	if occupier:
+		_game_over(true)
+
+
+func _game_over(win: bool) -> void:
+	if game_over != "":
+		return
+	game_over = "win" if win else "lose"
+	var detail := "用时 %d:%02d   击退波次 %d   歼敌 %d   存活兵力 %d" % [
+		int(sim_time) / 60, int(sim_time) % 60, raid_count,
+		bandits_spawned - sim.count_alive(1), sim.count_alive(0),
+	]
+	hud.show_game_over(win, detail)
+
+
+# 袭扰收尾：打完仗发呆的土匪撤回匪营并消失（防止长局堆积站桩单位）；
+# 同节拍顺带做胜利判定
 func _tick_raid_ai(step: float) -> void:
 	raid_ai_timer -= step
 	if raid_ai_timer > 0.0:
 		return
 	raid_ai_timer = 2.0
+	_check_victory()
 	for id in raid_units.keys():
 		# 槽位可能被复用成别的单位：阵营不对就放弃跟踪
 		if not sim.is_unit_alive(id) or sim.get_unit_faction(id) != 1:
@@ -339,6 +378,7 @@ func _train_unit(t: Dictionary) -> void:
 				var pos := Vector2(cell % MAP_DIM, cell / MAP_DIM) * TILE + Vector2(TILE, TILE * 3)
 				sim.spawn_units(t["type"], 1, pos, 0)
 				_sync_unit_mesh()
+				hud.notice("%s +1（出自%s）" % [t["name"], BUILDINGS[t["building"]]["name"]], 2.0)
 			else:
 				hud.notice("资源不足")
 			return
@@ -376,11 +416,16 @@ func _process(delta: float) -> void:
 		pan = raw
 	camera.position += pan * delta * 900.0 / camera.zoom.x
 
+	if paused or game_over != "":
+		sim_accum = 0.0
+		queue_redraw()
+		return
 	sim_accum += delta * (20.0 if OS.get_environment("CIVERA_SHOT") != "" else 1.0)
 	var step := 1.0 / SIM_HZ
 	while sim_accum >= step:
 		sim_accum -= step
 		sim.tick(step)
+		sim_time += step
 		# 土匪袭扰：定期从匪营出兵压向玩家营地
 		raid_timer -= step
 		if raid_timer <= 0.0 and bandit_pos != Vector2.ZERO:
@@ -400,6 +445,7 @@ func _process(delta: float) -> void:
 			sim.command_move(wave, camp_pos)
 			for id in wave:
 				raid_units[id] = 0 # 收尾 AI 跟踪
+			bandits_spawned += wave.size()
 			_sync_unit_mesh()
 			hud.notice("⚔ 土匪来袭（×%d）%s" % [wave.size(), tag], 5.0)
 		_tick_raid_ai(step)
@@ -415,8 +461,11 @@ func _process(delta: float) -> void:
 		var from_pos := _event_pos(events[e], flat_b)
 		var to_pos := _event_pos(events[e + 1], flat_b)
 		attack_fx.append({ "from": from_pos, "to": to_pos, "ttl": 0.25 })
-	if sim.take_building_events().size() > 0: # 有建筑被摧毁，重画
+	var bev := sim.take_building_events()
+	if bev.size() > 0: # 有建筑被摧毁，重画
 		_rebuild_building_visuals()
+		if 0 in bev: # 初始营地（building 0）被拆 = 战败
+			_game_over(false)
 	var tev := map.take_terrain_events() # 枯竭森林→草地：刷贴图与小地图
 	if tev.size() > 0:
 		for cell in tev:
@@ -474,23 +523,52 @@ func _draw() -> void:
 	for fx in attack_fx:
 		var a: float = fx["ttl"] / 0.25
 		draw_line(fx["from"], fx["to"], Color(1.0, 0.9, 0.4, a), 1.5)
+	# 受损单位无条件画血条（乱战可读性：不选中也得知道该撤谁）
+	var all_ids := PackedInt32Array(range(sim.get_unit_count()))
+	var all_pts := sim.get_unit_positions(all_ids)
+	for id in all_ids:
+		if not sim.is_unit_alive(id):
+			continue
+		var ratio: float = sim.get_unit_hp(id) / SimWorld.unit_max_hp(sim.get_unit_type(id))
+		if ratio >= 1.0:
+			continue
+		var p := all_pts[id]
+		draw_rect(Rect2(p + Vector2(-9, -15), Vector2(18, 3)), Color(0, 0, 0, 0.7))
+		draw_rect(Rect2(p + Vector2(-9, -15), Vector2(18 * ratio, 3)),
+				Color(1.0 - ratio, ratio, 0.1))
+	# 受损建筑血条（土匪啃门时玩家必须看得见门在掉血）
+	var flat_b := sim.get_buildings()
+	for b in range(flat_b.size() / 2):
+		var bhp: float = sim.get_building_hp(b)
+		var bmax: float = SimWorld.building_max_hp(flat_b[b * 2])
+		if bhp <= 0.0 or bhp >= bmax:
+			continue
+		var cell := flat_b[b * 2 + 1]
+		var bw: float = SimWorld.building_size(flat_b[b * 2]) * TILE
+		var bp := Vector2(cell % MAP_DIM, cell / MAP_DIM) * TILE
+		draw_rect(Rect2(bp + Vector2(0, -6), Vector2(bw, 4)), Color(0, 0, 0, 0.7))
+		draw_rect(Rect2(bp + Vector2(0, -6), Vector2(bw * bhp / bmax, 4)),
+				Color(1.0 - bhp / bmax, bhp / bmax, 0.1))
 	if selected.size() > 0:
 		var pts := sim.get_unit_positions(selected)
 		for k in selected.size():
 			var id := selected[k]
 			if not sim.is_unit_alive(id):
 				continue
-			var p := pts[k]
-			draw_arc(p, 11.0, 0, TAU, 24, Color(0.3, 1.0, 0.3, 0.9), 2.0)
-			# 血条
-			var ratio: float = sim.get_unit_hp(id) / SimWorld.unit_max_hp(sim.get_unit_type(id))
-			draw_rect(Rect2(p + Vector2(-9, -15), Vector2(18, 3)), Color(0, 0, 0, 0.7))
-			draw_rect(Rect2(p + Vector2(-9, -15), Vector2(18 * ratio, 3)),
-					Color(1.0 - ratio, ratio, 0.1))
+			draw_arc(pts[k], 11.0, 0, TAU, 24, Color(0.3, 1.0, 0.3, 0.9), 2.0)
 	if dragging:
 		var rect := _drag_rect()
 		draw_rect(rect, Color(0.4, 1.0, 0.4, 0.12), true)
 		draw_rect(rect, Color(0.4, 1.0, 0.4, 0.9), false, 2.0 / camera.zoom.x)
+
+
+func _select_all(workers: bool) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for id in sim.get_unit_count():
+		if sim.is_unit_alive(id) and sim.get_unit_faction(id) == 0 \
+				and (sim.get_unit_type(id) == 0) == workers:
+			out.append(id)
+	return out
 
 
 func _drag_rect() -> Rect2:
@@ -567,7 +645,15 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		else:
 			selected = PackedInt32Array()
 	elif key.keycode == KEY_A and key.ctrl_pressed:
-		selected = PackedInt32Array(range(sim.get_unit_count()))
+		selected = _select_all(false) # 全选军队（混编工人会让右键命令歧义）
+	elif key.keycode == KEY_W and key.ctrl_pressed:
+		selected = _select_all(true) # 全选工人
+	elif key.keycode == KEY_SPACE:
+		if game_over == "":
+			paused = not paused
+			hud.notice("⏸ 已暂停（Space 继续）" if paused else "▶ 继续", 600.0 if paused else 1.5)
+	elif key.keycode == KEY_R and game_over != "":
+		get_tree().reload_current_scene()
 	elif key.keycode >= KEY_F1 and key.keycode <= KEY_F8 and selected.size() > 0:
 		var f := key.keycode - KEY_F1 + 1 # F1=横线 … F8=新月
 		sim.command_set_formation(selected, f)
@@ -584,7 +670,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_load_game()
 
 
-const SAVE_MAGIC := 0x43495632 # "CIV2"：游戏层头（袭扰状态），魔数不符 = 旧格式拒载
+const SAVE_MAGIC := 0x43495633 # "CIV3"：游戏层头（袭扰状态+战局统计），魔数不符 = 旧格式拒载
 
 
 func _save_game() -> void:
@@ -594,6 +680,8 @@ func _save_game() -> void:
 	f.store_32(SAVE_MAGIC)
 	f.store_float(raid_timer) # 游戏层状态：袭扰节奏与升级进度
 	f.store_32(raid_count)
+	f.store_float(sim_time) # 战局统计（结算面板用）
+	f.store_32(bandits_spawned)
 	var map_data := map.save_state()
 	var sim_data := sim.save_state()
 	f.store_32(map_data.size())
@@ -612,6 +700,8 @@ func _load_game() -> void:
 		return
 	var saved_raid_timer := f.get_float()
 	var saved_raid_count := f.get_32()
+	var saved_sim_time := f.get_float()
+	var saved_spawned := f.get_32()
 	var map_data := f.get_buffer(f.get_32())
 	var sim_data := f.get_buffer(f.get_32())
 	if not map.load_state(map_data) or not sim.load_state(sim_data):
@@ -619,6 +709,11 @@ func _load_game() -> void:
 		return
 	raid_timer = saved_raid_timer
 	raid_count = saved_raid_count
+	sim_time = saved_sim_time
+	bandits_spawned = saved_spawned
+	game_over = ""
+	paused = false
+	hud.hide_game_over()
 	# 跟踪表不入档：野外的土匪（非匪营守卫）重新纳入收尾 AI
 	raid_units.clear()
 	for id in sim.get_unit_count():

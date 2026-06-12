@@ -213,6 +213,7 @@ public:
     void debug_damage_building(int p_index, float p_damage); // 测试用
     static godot::Vector2i building_cost(int p_type); // (木材, 石料)
     static int building_footprint(int p_type); // 占地边长（格）
+    static float building_max_hp_of(int p_type); // 血条/修理 UI 用
 
     godot::PackedInt32Array get_units_in_rect(godot::Vector2 p_min, godot::Vector2 p_max) const;
     godot::PackedVector2Array get_unit_positions(const godot::PackedInt32Array &p_ids) const;
