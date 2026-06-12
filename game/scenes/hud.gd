@@ -117,6 +117,16 @@ func _status_line() -> String:
 		for t in counts:
 			bits.append("%s×%d" % [UNIT_NAMES[t], counts[t]])
 		parts.append("已选 " + " ".join(bits))
+	if main.selected_building >= 0 and main.sim.get_building_hp(main.selected_building) > 0.0:
+		var bt: int = main.sim.get_buildings()[main.selected_building * 2]
+		var q: int = main.train_queues.get(main.selected_building, []).size()
+		var binfo: String = "%s HP %d/%d" % [main.BUILDINGS[bt]["name"],
+				int(main.sim.get_building_hp(main.selected_building)),
+				int(SimWorld.building_max_hp(bt))]
+		if q > 0:
+			binfo += "  训练队列 ×%d" % q
+		binfo += "  （右键设集结点）"
+		parts.append(binfo)
 	# 悬停地块（用 main 的世界坐标系，CanvasLayer 内坐标不同）
 	var hc := Vector2i(main.get_global_mouse_position() / float(main.TILE))
 	if hc.x >= 0 and hc.x < main.MAP_DIM and hc.y >= 0 and hc.y < main.MAP_DIM:

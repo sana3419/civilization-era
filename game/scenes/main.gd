@@ -72,6 +72,13 @@ var sim_time := 0.0
 var bandits_spawned := 0
 var terrain_layer: TileMapLayer # 枯竭地块刷新用
 var raid_units := {} # 袭扰单位 id → 连续空闲检查次数（收尾 AI 用）
+var cmd_queues := {} # 单位 id → Array[Vector2]：Shift 排队的命令点，待命时依次执行
+var selected_building := -1 # 左键空点己方建筑 = 选中（设集结点/看队列）
+var rally := {} # 建筑 index → Vector2 集结点（新兵出厂自动前往）
+var train_queues := {} # 建筑 index → Array[TRAIN 项]
+var train_timers := {} # 建筑 index → 当前项剩余秒
+var queue_accum := 0.0
+const TRAIN_TIME := 4.0 # 秒/单位：训练不再瞬时出兵
 var raid_ai_timer := 0.0
 var ghost := ColorRect.new()
 var shot_timer := 0.0
@@ -367,22 +374,33 @@ func _tick_raid_ai(step: float) -> void:
 
 
 func _train_unit(t: Dictionary) -> void:
-	if sim.count_alive(0) >= hud.pop_cap():
+	var queued := 0
+	for b in train_queues:
+		queued += train_queues[b].size()
+	if sim.count_alive(0) + queued >= hud.pop_cap():
 		hud.notice("人口已满，先造房屋（+%d/座）" % GameHud.POP_PER_HOUSE)
 		return
+	# 找有该建筑里队列最短的一座
 	var flat := sim.get_buildings()
+	var best := -1
+	var best_q := 999
 	for b in range(flat.size() / 2):
 		if flat[b * 2] == t["building"] and sim.get_building_hp(b) > 0.0:
-			if sim.try_spend(t["wood"], t.get("stone", 0), t["food"]):
-				var cell := flat[b * 2 + 1]
-				var pos := Vector2(cell % MAP_DIM, cell / MAP_DIM) * TILE + Vector2(TILE, TILE * 3)
-				sim.spawn_units(t["type"], 1, pos, 0)
-				_sync_unit_mesh()
-				hud.notice("%s +1（出自%s）" % [t["name"], BUILDINGS[t["building"]]["name"]], 2.0)
-			else:
-				hud.notice("资源不足")
-			return
-	hud.notice("需要先建%s" % BUILDINGS[t["building"]]["name"])
+			var q: int = train_queues.get(b, []).size()
+			if q < best_q:
+				best = b
+				best_q = q
+	if best < 0:
+		hud.notice("需要先建%s" % BUILDINGS[t["building"]]["name"])
+		return
+	if not sim.try_spend(t["wood"], t.get("stone", 0), t["food"]):
+		hud.notice("资源不足")
+		return
+	if not train_queues.has(best):
+		train_queues[best] = []
+		train_timers[best] = TRAIN_TIME
+	train_queues[best].append(t)
+	hud.notice("%s 开始训练（队列 ×%d）" % [t["name"], train_queues[best].size()], 2.0)
 
 
 # 读档后全量重刷地形贴图与小地图（枯竭草地与初始生成不同）
@@ -449,6 +467,7 @@ func _process(delta: float) -> void:
 			_sync_unit_mesh()
 			hud.notice("⚔ 土匪来袭（×%d）%s" % [wave.size(), tag], 5.0)
 		_tick_raid_ai(step)
+		_tick_training(step)
 
 	sim.write_render_buffer(sim_accum / step) # 插值系数
 	if unit_mm.instance_count > 0:
@@ -490,6 +509,10 @@ func _process(delta: float) -> void:
 			if sim.is_unit_alive(id) and sim.get_unit_faction(id) == 0:
 				keep.append(id)
 		selected = keep
+	queue_accum += delta
+	if queue_accum >= 0.5:
+		queue_accum = 0.0
+		_pump_cmd_queues()
 	hud.update(delta)
 	queue_redraw()
 
@@ -556,6 +579,29 @@ func _draw() -> void:
 			if not sim.is_unit_alive(id):
 				continue
 			draw_arc(pts[k], 11.0, 0, TAU, 24, Color(0.3, 1.0, 0.3, 0.9), 2.0)
+	if selected_building >= 0 and sim.get_building_hp(selected_building) > 0.0:
+		var flatb := sim.get_buildings()
+		var bc := flatb[selected_building * 2 + 1]
+		var fp: float = SimWorld.building_size(flatb[selected_building * 2]) * TILE
+		var bp := Vector2(bc % MAP_DIM, bc / MAP_DIM) * TILE
+		draw_rect(Rect2(bp, Vector2(fp, fp)), Color(1, 1, 1, 0.9), false, 2.0)
+		if rally.has(selected_building): # 集结点旗
+			var rp: Vector2 = rally[selected_building]
+			draw_line(bp + Vector2(fp, fp) * 0.5, rp, Color(0.3, 1.0, 0.3, 0.4), 1.0)
+			draw_line(rp, rp + Vector2(0, -14), Color(0.9, 0.9, 0.9), 2.0)
+			draw_colored_polygon(PackedVector2Array([
+				rp + Vector2(0, -14), rp + Vector2(10, -10), rp + Vector2(0, -6),
+			]), Color(0.3, 1.0, 0.3))
+	for b in train_queues: # 训练进度条（黄）
+		if train_queues[b].is_empty():
+			continue
+		var flatq := sim.get_buildings()
+		var qc := flatq[b * 2 + 1]
+		var qw: float = SimWorld.building_size(flatq[b * 2]) * TILE
+		var qp := Vector2(qc % MAP_DIM, qc / MAP_DIM) * TILE
+		var prog: float = 1.0 - train_timers.get(b, TRAIN_TIME) / TRAIN_TIME
+		draw_rect(Rect2(qp + Vector2(0, -11), Vector2(qw, 4)), Color(0, 0, 0, 0.7))
+		draw_rect(Rect2(qp + Vector2(0, -11), Vector2(qw * prog, 4)), Color(1.0, 0.85, 0.2))
 	if dragging:
 		var rect := _drag_rect()
 		draw_rect(rect, Color(0.4, 1.0, 0.4, 0.12), true)
@@ -569,6 +615,68 @@ func _select_all(workers: bool) -> PackedInt32Array:
 				and (sim.get_unit_type(id) == 0) == workers:
 			out.append(id)
 	return out
+
+
+# 右键智能命令链：敌人=集火 → 石墙=登墙 → 受损建筑=修理 → 资源=采集/其余=行军
+func _smart_command(ids: PackedInt32Array, pos: Vector2) -> void:
+	var enemy: int = sim.get_unit_at(pos, 20.0, 1)
+	if enemy >= 0:
+		sim.command_attack(ids, enemy)
+	elif sim.command_garrison(ids, pos):
+		pass
+	elif sim.command_repair(ids, pos):
+		pass
+	else:
+		sim.command_gather(ids, pos)
+
+
+func _building_at(pos: Vector2) -> int:
+	var cell := Vector2i(pos / TILE)
+	var flat := sim.get_buildings()
+	for b in range(flat.size() / 2):
+		if sim.get_building_hp(b) <= 0.0:
+			continue
+		var bc := flat[b * 2 + 1]
+		var anchor := Vector2i(bc % MAP_DIM, bc / MAP_DIM)
+		var fp: int = SimWorld.building_size(flat[b * 2])
+		if cell.x >= anchor.x and cell.x < anchor.x + fp \
+				and cell.y >= anchor.y and cell.y < anchor.y + fp:
+			return b
+	return -1
+
+
+# 命令队列泵：待命的单位执行下一条排队命令（0.5s 节拍）
+func _pump_cmd_queues() -> void:
+	for id in cmd_queues.keys():
+		if not sim.is_unit_alive(id) or sim.get_unit_faction(id) != 0 \
+				or cmd_queues[id].is_empty():
+			cmd_queues.erase(id)
+			continue
+		if sim.get_unit_state(id) == 1: # 待命
+			var pos: Vector2 = cmd_queues[id].pop_front()
+			_smart_command(PackedInt32Array([id]), pos)
+
+
+# 训练队列：到点出兵，有集结点就自动前往
+func _tick_training(step: float) -> void:
+	for b in train_queues.keys():
+		if train_queues[b].is_empty() or sim.get_building_hp(b) <= 0.0:
+			train_queues.erase(b) # 建筑被拆：队列连同已扣资源沉没（与现实一致）
+			train_timers.erase(b)
+			continue
+		train_timers[b] = train_timers.get(b, TRAIN_TIME) - step
+		if train_timers[b] > 0.0:
+			continue
+		train_timers[b] = TRAIN_TIME
+		var t: Dictionary = train_queues[b].pop_front()
+		var flat := sim.get_buildings()
+		var cell := flat[b * 2 + 1]
+		var pos := Vector2(cell % MAP_DIM, cell / MAP_DIM) * TILE + Vector2(TILE, TILE * 3)
+		var id: int = sim.spawn_units(t["type"], 1, pos, 0)
+		_sync_unit_mesh()
+		if rally.has(b):
+			sim.command_move(PackedInt32Array([id]), rally[b])
+		hud.notice("%s 训练完成" % t["name"], 2.0)
 
 
 func _drag_rect() -> Rect2:
@@ -607,15 +715,19 @@ func _unhandled_input(event: InputEvent) -> void:
 						_exit_place_mode()
 					elif selected.size() > 0:
 						var pos := get_global_mouse_position()
-						var enemy: int = sim.get_unit_at(pos, 20.0, 1)
-						if enemy >= 0: # 点敌人 = 集火
-							sim.command_attack(selected, enemy)
-						elif sim.command_garrison(selected, pos):
-							pass # 点己方石墙 = 派一人登墙驻守（士兵）
-						elif sim.command_repair(selected, pos):
-							pass # 点受损建筑 = 工人修理
+						if Input.is_key_pressed(KEY_SHIFT): # 命令队列：待命后依次执行
+							for id in selected:
+								if not cmd_queues.has(id):
+									cmd_queues[id] = []
+								cmd_queues[id].append(pos)
+							hud.notice("命令已排队（×%d）" % cmd_queues[selected[0]].size(), 1.5)
 						else:
-							sim.command_gather(selected, pos)
+							for id in selected:
+								cmd_queues.erase(id) # 直接命令覆盖旧队列
+							_smart_command(selected, pos)
+					elif selected_building >= 0 and sim.get_building_hp(selected_building) > 0.0:
+						rally[selected_building] = get_global_mouse_position()
+						hud.notice("集结点已设置")
 		elif event.button_index == MOUSE_BUTTON_LEFT and dragging:
 			dragging = false
 			var rect := _drag_rect()
@@ -623,10 +735,14 @@ func _unhandled_input(event: InputEvent) -> void:
 			if is_click:
 				rect = Rect2(rect.position - Vector2(12, 12), Vector2(24, 24))
 			selected = sim.get_units_in_rect(rect.position, rect.end)
-			# 空点己方城门 = 开/关切换
-			if is_click and selected.size() == 0 \
-					and sim.toggle_gate_at(get_global_mouse_position()):
-				_rebuild_building_visuals()
+			if selected.size() > 0:
+				selected_building = -1
+			elif is_click:
+				# 空点：门先试开关，否则选中建筑（看队列/右键设集结点）
+				if sim.toggle_gate_at(get_global_mouse_position()):
+					_rebuild_building_visuals()
+				else:
+					selected_building = _building_at(get_global_mouse_position())
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
@@ -644,6 +760,13 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			_exit_place_mode()
 		else:
 			selected = PackedInt32Array()
+			selected_building = -1
+	elif key.keycode == KEY_S and not key.ctrl_pressed and selected.size() > 0:
+		var pts := sim.get_unit_positions(selected)
+		for k in selected.size():
+			cmd_queues.erase(selected[k])
+			sim.command_move(PackedInt32Array([selected[k]]), pts[k])
+		hud.notice("停止", 1.0)
 	elif key.keycode == KEY_A and key.ctrl_pressed:
 		selected = _select_all(false) # 全选军队（混编工人会让右键命令歧义）
 	elif key.keycode == KEY_W and key.ctrl_pressed:
