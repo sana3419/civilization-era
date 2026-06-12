@@ -61,6 +61,8 @@ var panning := false # 左键拖动地图
 var pan_dist := 0.0
 var left_anchor := Vector2.ZERO # 左键按下时世界坐标（短击 = 点选）
 var box_selecting := false # 右键拖动框选
+var selected_building := -1 # 与单位选中互斥（RW 式建筑选中）
+var rally := {} # 出兵建筑集结点：building index -> 世界坐标（不入存档，读档清空）
 var drag_anchor := Vector2.ZERO
 var overlay := Node2D.new() # 覆盖层：橡皮筋/血条/选中圈/特效（置于地图之上）
 var deco_layer: TileMapLayer
@@ -121,7 +123,7 @@ func _ready() -> void:
 	add_child(overlay)
 
 	if OS.get_environment("CIVERA_SHOT") != "":
-		selected = PackedInt32Array(range(START_WORKERS))
+		set_selection(PackedInt32Array(range(START_WORKERS)))
 		var forest := _find_nearest_terrain(camp_cell, 4)
 		if forest.x >= 0:
 			sim.command_gather(selected, (Vector2(forest) + Vector2(0.5, 0.5)) * TILE)
@@ -480,23 +482,24 @@ func _tick_raid_ai(step: float) -> void:
 			raid_units[id] = 0
 
 
-func _train_unit(t: Dictionary) -> void:
+# 从选中建筑训练（RW 式：训练按钮挂在建筑面板上），出兵后驶向集结点
+func _train_unit_at(t: Dictionary, b: int) -> void:
 	if sim.count_alive(0) >= hud.pop_cap():
 		hud.notice("人口已满，先造房屋（+%d/座）" % GameHud.POP_PER_HOUSE)
 		return
 	var flat := sim.get_buildings()
-	for b in range(flat.size() / 2):
-		if flat[b * 2] == t["building"] and sim.get_building_hp(b) > 0.0:
-			if sim.try_spend(t["wood"], t.get("stone", 0), t["food"]):
-				var cell := flat[b * 2 + 1]
-				var pos := Vector2(cell % MAP_DIM, cell / MAP_DIM) * TILE + Vector2(TILE, TILE * 3)
-				sim.spawn_units(t["type"], 1, pos, 0)
-				_sync_unit_mesh()
-				hud.notice("%s +1（出自%s）" % [t["name"], BUILDINGS[t["building"]]["name"]], 2.0)
-			else:
-				hud.notice("资源不足")
-			return
-	hud.notice("需要先建%s" % BUILDINGS[t["building"]]["name"])
+	if b < 0 or b >= flat.size() / 2 or sim.get_building_hp(b) <= 0.0:
+		return
+	if not sim.try_spend(t["wood"], t.get("stone", 0), t["food"]):
+		hud.notice("资源不足")
+		return
+	var cell := flat[b * 2 + 1]
+	var pos := Vector2(cell % MAP_DIM, cell / MAP_DIM) * TILE + Vector2(TILE, TILE * 3)
+	var first: int = sim.spawn_units(t["type"], 1, pos, 0)
+	_sync_unit_mesh()
+	if rally.has(b): # 集结点
+		sim.command_move(PackedInt32Array([first]), rally[b])
+	hud.notice("%s +1（出自%s）" % [t["name"], BUILDINGS[t["building"]]["name"]], 2.0)
 
 
 # 读档后全量重刷地形贴图/装饰/小地图（枯竭草地与初始生成不同）
@@ -608,7 +611,10 @@ func _process(delta: float) -> void:
 		for id in selected:
 			if sim.is_unit_alive(id) and sim.get_unit_faction(id) == 0:
 				keep.append(id)
-		selected = keep
+		if keep.size() != selected.size():
+			set_selection(keep)
+	if selected_building >= 0 and sim.get_building_hp(selected_building) <= 0.0:
+		set_selected_building(-1) # 选中建筑被摧毁
 	hud.update(delta)
 	overlay.queue_redraw()
 
@@ -676,6 +682,16 @@ func _draw_overlay() -> void:
 			if not sim.is_unit_alive(id):
 				continue
 			overlay.draw_arc(pts[k], 11.0, 0, TAU, 24, Color(0.3, 1.0, 0.3, 0.9), 2.0)
+	if selected_building >= 0: # 选中建筑高亮 + 集结旗
+		var fb := sim.get_buildings()
+		var bcell := fb[selected_building * 2 + 1]
+		var bw: float = SimWorld.building_size(fb[selected_building * 2]) * TILE
+		var bp := Vector2(bcell % MAP_DIM, bcell / MAP_DIM) * TILE
+		overlay.draw_rect(Rect2(bp, Vector2(bw, bw)), Color(0.3, 1.0, 0.3, 0.9), false, 2.0)
+		if rally.has(selected_building):
+			var rp: Vector2 = rally[selected_building]
+			overlay.draw_line(rp, rp + Vector2(0, -14), Color.WHITE, 2.0)
+			overlay.draw_rect(Rect2(rp + Vector2(0, -14), Vector2(10, 6)), Color(0.3, 1.0, 0.3))
 	if box_selecting:
 		var rect := _drag_rect()
 		overlay.draw_rect(rect, Color(0.4, 1.0, 0.4, 0.12), true)
@@ -694,6 +710,43 @@ func _select_all(workers: bool) -> PackedInt32Array:
 func _drag_rect() -> Rect2:
 	var cur := get_global_mouse_position()
 	return Rect2(drag_anchor, cur - drag_anchor).abs()
+
+
+# ---- 选中状态中心化（变更必经此处，驱动上下文面板刷新）----
+
+func set_selection(ids: PackedInt32Array) -> void:
+	selected = ids
+	if ids.size() > 0:
+		selected_building = -1
+	hud.refresh_context()
+
+
+func set_selected_building(b: int) -> void:
+	selected_building = b
+	if b >= 0:
+		selected = PackedInt32Array()
+	hud.refresh_context()
+
+
+# chips：exclude=false 只选该类型，true 剔除该类型
+func filter_selection_type(type: int, exclude: bool) -> void:
+	var keep := PackedInt32Array()
+	for id in selected:
+		if (sim.get_unit_type(id) == type) != exclude:
+			keep.append(id)
+	set_selection(keep)
+
+
+func _set_formation(f: int) -> void:
+	if selected.size() == 0:
+		return
+	sim.command_set_formation(selected, f)
+	var pts := sim.get_unit_positions(selected)
+	var c := Vector2.ZERO
+	for p in pts:
+		c += p
+	sim.command_move(selected, c / pts.size())
+	hud.notice("阵型：" + FORMATION_NAMES[f])
 
 
 # 操控方案：左键拖动 = 平移地图，左键短击 = 点选/开关门；
@@ -740,19 +793,28 @@ func _unhandled_input(event: InputEvent) -> void:
 				MOUSE_BUTTON_LEFT:
 					if panning:
 						panning = false
-						if pan_dist < 8.0: # 短击 = 点选 / 开关门
+						if pan_dist < 8.0: # 短击 = 点选：单位优先，其次建筑，否则清空
 							var rect := Rect2(left_anchor - Vector2(12, 12), Vector2(24, 24))
-							selected = sim.get_units_in_rect(rect.position, rect.end)
-							if selected.size() == 0 and sim.toggle_gate_at(left_anchor):
-								_rebuild_building_visuals()
+							var ids := sim.get_units_in_rect(rect.position, rect.end)
+							if ids.size() > 0:
+								set_selection(ids)
+							else:
+								set_selected_building(sim.get_building_at(left_anchor))
 				MOUSE_BUTTON_RIGHT:
 					if box_selecting:
 						box_selecting = false
 						var rect := _drag_rect()
 						if rect.size.length() >= 8.0: # 拖动 = 框选
-							selected = sim.get_units_in_rect(rect.position, rect.end)
-						elif selected.size() > 0: # 短击 = 命令
-							var pos := get_global_mouse_position()
+							set_selection(sim.get_units_in_rect(rect.position, rect.end))
+							return
+						var pos := get_global_mouse_position()
+						if selected_building >= 0: # 选中出兵建筑 → 右键设集结点
+							var flat := sim.get_buildings()
+							if flat[selected_building * 2] in [6, 7, 8, 13]:
+								rally[selected_building] = pos
+								hud.notice("⚑ 集结点已设定", 2.0)
+							return
+						if selected.size() > 0: # 短击 = 命令
 							var enemy: int = sim.get_unit_at(pos, 20.0, 1)
 							if enemy >= 0: # 点敌人 = 集火
 								sim.command_attack(selected, enemy)
@@ -773,16 +835,17 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		if key.ctrl_pressed:
 			groups[n] = selected.duplicate()
 		else:
-			selected = groups.get(n, PackedInt32Array())
+			set_selection(groups.get(n, PackedInt32Array()))
 	elif key.keycode == KEY_ESCAPE:
 		if place_mode >= 0:
 			_exit_place_mode()
 		else:
-			selected = PackedInt32Array()
+			set_selection(PackedInt32Array())
+			set_selected_building(-1)
 	elif key.keycode == KEY_A and key.ctrl_pressed:
-		selected = _select_all(false) # 全选军队（混编工人会让右键命令歧义）
+		set_selection(_select_all(false)) # 全选军队（混编工人会让右键命令歧义）
 	elif key.keycode == KEY_W and key.ctrl_pressed:
-		selected = _select_all(true) # 全选工人
+		set_selection(_select_all(true)) # 全选工人
 	elif key.keycode == KEY_SPACE:
 		if game_over == "":
 			paused = not paused
@@ -790,15 +853,9 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	elif key.keycode == KEY_R and game_over != "":
 		get_tree().reload_current_scene()
 	elif key.keycode >= KEY_F1 and key.keycode <= KEY_F8 and selected.size() > 0:
-		var f := key.keycode - KEY_F1 + 1 # F1=横线 … F8=新月
-		sim.command_set_formation(selected, f)
-		# 以当前质心重整队形
-		var pts := sim.get_unit_positions(selected)
-		var c := Vector2.ZERO
-		for p in pts:
-			c += p
-		sim.command_move(selected, c / pts.size())
-		hud.notice("阵型：" + FORMATION_NAMES[f])
+		_set_formation(key.keycode - KEY_F1 + 1) # F1=横线 … F8=新月
+	elif key.keycode == KEY_S and not key.ctrl_pressed and selected.size() > 0:
+		sim.command_stop(selected)
 	elif key.keycode == KEY_S and key.ctrl_pressed:
 		_save_game()
 	elif key.keycode == KEY_F9:
@@ -858,7 +915,9 @@ func _load_game() -> void:
 				raid_units[id] = 0
 	_refresh_terrain_visuals() # 地形可能与初始生成不同（枯竭草地）
 	# sim 持有的 map 引用不变，load_state 已重建占地位图与流场缓存
-	selected = PackedInt32Array()
+	rally.clear() # 集结点不入存档
+	set_selection(PackedInt32Array())
+	set_selected_building(-1)
 	_sync_unit_mesh()
 	_rebuild_building_visuals()
 	hud.notice("已读档")

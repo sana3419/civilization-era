@@ -208,7 +208,10 @@ public:
     godot::PackedInt32Array get_buildings() const; // 扁平 [type, cell, ...]（含已摧毁，hp<=0）
     float get_building_hp(int p_index) const;
     int get_building_state(int p_index) const;
+    int get_building_at(godot::Vector2 p_world_pos) const; // 含占地判定，无 → -1
+    bool toggle_gate(int p_index); // 开/关城门（按索引，UI 面板用）
     bool toggle_gate_at(godot::Vector2 p_world_pos); // 开/关己方城门
+    void command_stop(const godot::PackedInt32Array &p_ids); // 停止：清命令转 IDLE
     godot::PackedInt32Array take_building_events(); // 取走并清空（本帧摧毁列表）
     void debug_damage_building(int p_index, float p_damage); // 测试用
     static godot::Vector2i building_cost(int p_type); // (木材, 石料)

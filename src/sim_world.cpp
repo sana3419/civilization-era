@@ -1872,24 +1872,57 @@ int SimWorld::get_building_state(int p_index) const {
     return (p_index >= 0 && p_index < int(b_state.size())) ? b_state[p_index] : 0;
 }
 
-bool SimWorld::toggle_gate_at(Vector2 p_world_pos) {
+int SimWorld::get_building_at(Vector2 p_world_pos) const {
     const int32_t cell = cell_of_pos(p_world_pos.x, p_world_pos.y);
     const int cx = cell % grid_dim, cy = cell / grid_dim;
     for (size_t b = 0; b < b_cell.size(); b++) {
-        if (!is_gate(b_type[b]) || b_hp[b] <= 0.0f) {
+        if (b_hp[b] <= 0.0f) {
             continue;
         }
         const int fp = building_footprint(b_type[b]);
         const int bx = b_cell[b] % grid_dim, by = b_cell[b] / grid_dim;
         if (cx >= bx && cx < bx + fp && cy >= by && cy < by + fp) {
-            b_state[b] ^= 1;
-            // 门只影响玩家侧通行性：只失效阵营 0 的场（敌方视角门恒为墙）。
-            // tick 间调用，立即清除安全。
-            for (auto it = field_cache.begin(); it != field_cache.end();) {
-                it = ((it->first >> 32) == 0) ? field_cache.erase(it) : ++it;
-            }
-            return true;
+            return int(b);
         }
+    }
+    return -1;
+}
+
+bool SimWorld::toggle_gate(int p_index) {
+    if (p_index < 0 || p_index >= int(b_cell.size()) ||
+            !is_gate(b_type[p_index]) || b_hp[p_index] <= 0.0f) {
+        return false;
+    }
+    b_state[p_index] ^= 1;
+    // 门只影响玩家侧通行性：只失效阵营 0 的场（敌方视角门恒为墙）。
+    // tick 间调用，立即清除安全。
+    for (auto it = field_cache.begin(); it != field_cache.end();) {
+        it = ((it->first >> 32) == 0) ? field_cache.erase(it) : ++it;
+    }
+    return true;
+}
+
+void SimWorld::command_stop(const PackedInt32Array &p_ids) {
+    for (int k = 0; k < p_ids.size(); k++) {
+        const int i = p_ids[k];
+        if (i < 0 || i >= unit_count || !alive[i] || state[i] == U_WANDER ||
+                state[i] == U_FLEE) { // 溃逃不受控；驻军(U_GARRISON)保持驻守
+            continue;
+        }
+        if (state[i] == U_GARRISON) {
+            continue;
+        }
+        state[i] = U_IDLE;
+        attack_target[i] = -1;
+        target_cell[i] = -1;
+        timer[i] = 0.0f;
+    }
+}
+
+bool SimWorld::toggle_gate_at(Vector2 p_world_pos) {
+    const int b = get_building_at(p_world_pos);
+    if (b >= 0 && toggle_gate(b)) {
+        return true;
     }
     return false;
 }
@@ -2158,6 +2191,9 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_static_method("SimWorld", D_METHOD("unit_max_hp", "type"), &SimWorld::unit_max_hp);
     ClassDB::bind_static_method("SimWorld", D_METHOD("building_max_hp", "type"), &SimWorld::building_max_hp_of);
     ClassDB::bind_method(D_METHOD("toggle_gate_at", "world_pos"), &SimWorld::toggle_gate_at);
+    ClassDB::bind_method(D_METHOD("get_building_at", "world_pos"), &SimWorld::get_building_at);
+    ClassDB::bind_method(D_METHOD("toggle_gate", "index"), &SimWorld::toggle_gate);
+    ClassDB::bind_method(D_METHOD("command_stop", "ids"), &SimWorld::command_stop);
     ClassDB::bind_method(D_METHOD("take_building_events"), &SimWorld::take_building_events);
     ClassDB::bind_method(D_METHOD("debug_damage_building", "index", "damage"), &SimWorld::debug_damage_building);
     ClassDB::bind_static_method("SimWorld", D_METHOD("building_size", "type"), &SimWorld::building_footprint);
