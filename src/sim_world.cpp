@@ -828,7 +828,9 @@ void SimWorld::command_gather(const PackedInt32Array &p_ids, Vector2 p_world_pos
     }
     const int32_t cell = cell_of_pos(p_world_pos.x, p_world_pos.y);
     const int res = GameMap::terrain_resource(map->terrain_at(cell % grid_dim, cell / grid_dim));
-    if (res < 0) {
+    // 食物不可徒手采集：平原遍地都是，右键移动会被误判成"采集往返"（试玩反馈）。
+    // 食物由农田定时产出（DESIGN 农田产粮的切片简化）
+    if (res < 0 || res == RES_FOOD) {
         command_move(p_ids, p_world_pos);
         return;
     }
@@ -1326,6 +1328,18 @@ void SimWorld::logic_pass(float p_dt) {
                 }
                 break;
             }
+        }
+    }
+
+    // 农田定时产粮（5 食物 / 10 秒；正式工人分配系统前的切片实现）
+    for (size_t b = 0; b < b_cell.size(); b++) {
+        if (b_type[b] != B_FARM || b_hp[b] <= 0.0f) {
+            continue;
+        }
+        b_timer[b] -= p_dt;
+        if (b_timer[b] <= 0.0f) {
+            b_timer[b] = 10.0f;
+            stockpile[RES_FOOD] += 5;
         }
     }
 
