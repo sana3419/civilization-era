@@ -46,9 +46,28 @@ godot --path game
 - Ctrl+1~9 设编队，1~9 选编队
 - WASD 平移相机，滚轮缩放；小地图点击/拖动跳转
 - 底部建造栏：选建筑 → 幽灵预览（绿可放/红不可）→ 左键放置（Shift 连放），右键/Esc 取消
+- 栅栏/石墙按住左键拖动划线连放；空地左键点己方城门/石门 = 开/关（开门只放行己方，土匪会攻门）
+- 选中士兵右键点己方石墙 = 派一人登墙（防御×5、射程+2格）；攻城工坊出攻城槌/投石车，土匪每第三波带槌
+- 人口上限 = 10 + 每座房屋 +5，满了先盖房；营地可训练工人；状态行显示选中详情与悬停地块资源余量
+- 工人右键受损建筑 = 修理（12HP/s）；砍光的森林会退化成草地；打完仗的土匪会撤回匪营消失
 - 工人满载自动运回**最近有效存储点**（营地/仓库收全部；伐木场=木材、采石场=石料、农田=食物）
 - F1~F8 切换阵型（横线/纵队/方阵/锥形/盾墙/圆阵/散兵/新月），影响攻防与移速
-- 右键点敌方单位 = 集火攻击；军事单位自动索敌，士气崩溃会溃逃
+- 右键点敌方单位 = 集火攻击；军事单位自动索敌，士气崩溃会溃逃（士气兵力比只数战斗单位）
+- Space 暂停；Ctrl+A 全选军队 / Ctrl+W 全选工人
+- 胜负：清空匪营守卫并兵临其址 = 胜利；初始营地被拆 = 战败；结算后按 R 重开
+- 袭扰首波 150s，之后每 90s 一波且规模递增（3+波数/2，上限 8），第三波带槌、第五波带投石车
 - Ctrl+S 存档 / F9 读档（user://save1.civ）
 - 模拟 10Hz 固定步长 + 渲染插值；人形单位不随速度旋转，仅左右镜像
 - 调试截图模式：CIVERA_SHOT=1 环境变量（20× 加速，6 秒后存 /tmp/civera_game.png 退出）
+
+## Windows 测试包导出（云端/CI 均可）
+
+```sh
+apt-get install -y mingw-w64 && update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+scons platform=windows arch=x86_64 target=template_debug use_mingw=true -j$(nproc)
+# 导出模板（一次性）：解 Godot_v4.6-stable_export_templates.tpz 里的 windows_* 到
+#   ~/.local/share/godot/export_templates/4.6.stable/
+godot --headless --path game --export-debug "Windows Desktop"   # → build/win64/
+```
+
+注意：wine 9 跑不动 Godot 4.6 官方模板（原版同样段错误），运行验证需真 Windows。

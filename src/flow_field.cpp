@@ -85,6 +85,9 @@ void FlowField::generate(int p_target_cx, int p_target_cy) {
         }
     }
     if (terrain_cost[target] == 255) {
+        // 目标完全不可达：清掉方向场再返回，避免复用实例时残留上一次的场
+        std::fill(dir_x.begin(), dir_x.end(), 0.0f);
+        std::fill(dir_y.begin(), dir_y.end(), 0.0f);
         return;
     }
 

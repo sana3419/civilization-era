@@ -38,7 +38,8 @@ godot --headless --path game -s bench/bench_sim.gd
 3. **并行规则**：worker 线程只允许"读共享旧状态 + 写本单位自己的槽位"
    （见 `move_range`/`separate_range`）。任何跨单位写（伤害、士气、入库、索敌）
    必须放在 `logic_pass`（串行，按单位序号顺序）。
-4. 索敌/士气扫描用**上一 tick 的空间网格**（`build_grid` 在 logic_pass 之后跑）。
+4. 索敌/士气扫描用**上一 tick 末位置的空间网格**（`build_grid` 在 tick 开头跑，
+   从当前位置构建——这样读档后能逐位重建，存读档续跑不分歧）。
 5. 模拟内不用 `Math.random`/时间源；RNG 是每单位 xorshift（`rng_state`）。
 
 ## Golden 回归工作流
@@ -52,8 +53,10 @@ godot --headless --path game -s bench/bench_sim.gd
 
 - **存档版本**：改动任何序列化数组（SoA 字段/建筑字段）必须升 `SAVE_VERSION`
   （`sim_world.cpp`）并同步 save_state/load_state 两处，hash 视情况加新字段。
-- **数值表双份**：`src/sim_world.cpp` 的 STATS/COUNTER/FORM 表与
-  `game/scenes/main.gd` 的 UNIT_MAX_HP/BUILDINGS/TRAIN 常量必须手工保持同步。
+- **数值表**：单位血量上限/建筑造价/占地已由 C++ 绑定单源提供
+  （`SimWorld.unit_max_hp/building_cost/building_size`）；仍为双份的是
+  `main.gd` 的 BUILDINGS（名字/颜色）与 TRAIN（训练成本/所属建筑），
+  改 C++ 枚举或加兵种建筑时要同步。
 - 枚举（UnitType/BuildingType/Terrain/Formation）在 C++ 与 GDScript 间按数值对应，
   改枚举两边都要动。
 - godot-cpp pinned `godot-4.5-stable`，绑定用根目录 `extension_api_4.6.json`
@@ -65,13 +68,25 @@ godot --headless --path game -s bench/bench_sim.gd
 ## 当前进度与路线（2026-06-11）
 
 已完成：第零阶段全部压测（10k 精灵 283FPS@Jetson）、第一阶段全部
-（地图/采集/建筑/RTS 操控/UI/存读档/小地图）、第二阶段大部
-（民兵/弓手/骑兵、克制表、士气溃败、8 阵型、冲锋动量、箭塔、土匪袭扰）。
+（地图/采集/建筑/RTS 操控/UI/存读档/小地图）、**第二阶段全部**
+（民兵/弓手/骑兵/长枪兵、克制表、士气溃败、8 阵型、冲锋动量、箭塔、土匪袭扰、
+木栅栏/木门：1×1 占地 + 阵营流场 + 土匪攻城破门 AI、
+攻城槌/投石车 + 攻城工坊 + 石墙/石门 + 墙上驻军：右键石墙登墙，
+防御×5 / 射程+2 格，攻城伤害修正全表化，袭扰每第三波带攻城槌）。
 
-第二阶段剩余：城墙/城门（线性障碍，需扩展建筑占地模型）、攻城器械、
-长枪兵（反骑兵）。然后是**可玩切片里程碑**（PLAN.md：发真人试玩，决定砍留）。
+切片胜负闭环已就绪（匪营 12 守卫=目标、营地陷落=战败、波次递增、结算/重开、
+暂停、建筑与交战单位血条、Ctrl+A/W 分类全选）；经多 agent 审查修复了
+确定性 P0（读档网格重建/枯竭流场失效）与"工人球"士气漏洞等（提交历史详述）。
 
-已知待办：单位仍可低速进入不可通行地形（0.25 减速权宜，需真地形碰撞）；
-资源储量可视化；房屋→人口挂钩；info 面板细化。
+下一步：**发真人试玩**（PLAN.md 切片决策点：不好玩 → 砍系统重排）。
+攻城侧明确推迟：攻方登墙（攻城梯/塔）、火攻/火炮、护城河。
+
+真地形碰撞已实现（move/separate 按中心点判格 + 轴向滑动，开门放行己方；
+worker 线程只读 occupied/b_state，符合铁律 3）。
+追击/修理寻路：>1 格走流场、不可达放弃；尸体槽位按"最小连续块"复用
+（调用方依赖 spawn_units 返回 first+连续区间，复用规则纯派生自 alive[]，
+读档后一致）。枯竭森林退化草地（take_resource 内，发 terrain_events）。
+工人可修理受损建筑（右键，12HP/s）；废墟原地重建即可（占地已释放）。
+HUD/小地图在 `game/scenes/hud.gd`（GameHud），main.gd 只留世界与输入。
 完整设计数值（兵种/地形/政策/外交等全部表格）见 **`DESIGN.md`**——
 实现新系统前先查它；代码数值与其冲突时以代码 + bench 为准并回写 DESIGN.md。

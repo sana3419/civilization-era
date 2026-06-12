@@ -71,7 +71,20 @@ int GameMap::take_resource(size_t p_cell, int p_amount) {
     const int avail = resource_amount[p_cell];
     const int taken = std::min(avail, p_amount);
     resource_amount[p_cell] = uint16_t(avail - taken);
+    // 枯竭可视化：砍光的森林退化为草地（不改可通行性——两者皆可走，
+    // 仅移动代价变化）；石料地形保持外观（岩石还在，只是采空）
+    if (taken > 0 && resource_amount[p_cell] == 0 &&
+            (terrain[p_cell] == T_FOREST || terrain[p_cell] == T_DENSE_FOREST)) {
+        terrain[p_cell] = T_GRASS;
+        terrain_events.push_back(int32_t(p_cell));
+    }
     return taken;
+}
+
+PackedInt32Array GameMap::take_terrain_events() {
+    PackedInt32Array out = terrain_events;
+    terrain_events.clear();
+    return out;
 }
 
 void GameMap::generate(int p_dim, int p_seed) {
@@ -197,6 +210,9 @@ void GameMap::_bind_methods() {
     ClassDB::bind_method(D_METHOD("is_passable", "cx", "cy"), &GameMap::is_passable);
     ClassDB::bind_method(D_METHOD("get_resource_amount", "cx", "cy"), &GameMap::get_resource_amount);
     ClassDB::bind_method(D_METHOD("move_cost", "cx", "cy"), &GameMap::move_cost);
+    ClassDB::bind_static_method("GameMap", D_METHOD("terrain_resource", "terrain"), &GameMap::terrain_resource);
+    ClassDB::bind_method(D_METHOD("take_terrain_events"), &GameMap::take_terrain_events);
+    ClassDB::bind_method(D_METHOD("take_resource_at", "cell", "amount"), &GameMap::take_resource_at);
     ClassDB::bind_method(D_METHOD("save_state"), &GameMap::save_state);
     ClassDB::bind_method(D_METHOD("load_state", "data"), &GameMap::load_state);
 }

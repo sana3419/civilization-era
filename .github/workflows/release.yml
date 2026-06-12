@@ -1,0 +1,87 @@
+# 推 v* tag 自动发布：编译 → bench 门禁 → 导出 Windows 包 → GitHub Release
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # 云端会话推不了 tag（git 代理只放行工作分支）：手动触发由 CI 建 tag
+    inputs:
+      version:
+        description: "版本号（如 v0.2.0-slice），将作为 tag 与 Release 名"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ inputs.version || github.ref_name }}
+
+jobs:
+  windows-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          lfs: true
+
+      - name: 工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y scons ccache mingw-w64
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: release-ccache-${{ github.ref_name }}
+          restore-keys: release-ccache-
+
+      - name: 编译（linux 供编辑器加载扩展，windows debug/release 出包）
+        run: |
+          export PATH=/usr/lib/ccache:$PATH
+          scons platform=linux arch=x86_64 target=template_debug -j$(nproc)
+          scons platform=windows arch=x86_64 target=template_debug use_mingw=true -j$(nproc)
+          scons platform=windows arch=x86_64 target=template_release use_mingw=true -j$(nproc)
+
+      - name: Godot 与导出模板
+        run: |
+          curl -sL -o godot.zip https://github.com/godotengine/godot-builds/releases/download/4.6-stable/Godot_v4.6-stable_linux.x86_64.zip
+          unzip -q godot.zip && sudo install Godot_v4.6-stable_linux.x86_64 /usr/local/bin/godot
+          curl -sL -o templates.tpz https://github.com/godotengine/godot-builds/releases/download/4.6-stable/Godot_v4.6-stable_export_templates.tpz
+          mkdir -p ~/.local/share/godot/export_templates/4.6.stable
+          unzip -q -j templates.tpz "templates/windows_*" -d ~/.local/share/godot/export_templates/4.6.stable
+
+      - name: bench 门禁（红了不发版）
+        run: |
+          godot --headless --path game --import
+          godot --headless --path game -s bench/bench_sim.gd
+
+      - name: 导出 Windows 包
+        run: |
+          mkdir -p build/win64
+          godot --headless --path game --export-release "Windows Desktop"
+          (cd build && zip -q -9 -r "civera-${VERSION}-win64.zip" win64)
+          rm -rf build/win64 && mkdir -p build/win64
+          godot --headless --path game --export-debug "Windows Desktop"
+          (cd build && zip -q -9 -r "civera-${VERSION}-win64-debug.zip" win64)
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          files: build/civera-*.zip
+          generate_release_notes: true
+          body: |
+            《文明纪元》可玩切片 Windows x64 测试包。
+
+            - `civera-*-win64.zip`：正式测试用（release 导出）
+            - `civera-*-win64-debug.zip`：排查问题用（debug 导出，`civilization-era.console.exe` 带控制台日志）
+
+            玩法：守住递增的土匪波次（首波 150 秒），攒兵反推匪营即胜利；
+            初始营地被拆则战败。操作清单见仓库 README。
+            存档位置：`%APPDATA%\Godot\app_userdata\`。

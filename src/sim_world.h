@@ -25,6 +25,8 @@ enum UnitState : uint8_t {
     U_RETURN = 4, // 满载运回最近有效存储点
     U_ATTACK = 5, // 追击 attack_target 并近战
     U_FLEE = 6, // 士气崩溃，逃向出生点，恢复后转 IDLE
+    U_GARRISON = 7, // 驻守石墙顶（防御×5、射程+2格），不移动
+    U_REPAIR = 8, // 工人修理受损建筑（贴近后 12HP/s）
 };
 
 enum UnitType : uint8_t {
@@ -33,7 +35,10 @@ enum UnitType : uint8_t {
     UT_BANDIT = 2, // 土匪
     UT_ARCHER = 3, // 弓箭手（远程）
     UT_CAVALRY = 4, // 轻骑兵
-    UT_COUNT = 5,
+    UT_SPEARMAN = 5, // 长枪兵（反骑兵）
+    UT_RAM = 6, // 攻城槌：只攻建筑（城门×3.0），无士气/索敌
+    UT_CATAPULT = 7, // 投石车：远程只攻建筑（城墙×1.5）
+    UT_COUNT = 8,
 };
 
 struct UnitStats {
@@ -70,7 +75,12 @@ enum BuildingType : uint8_t {
     B_ARCHERY = 7, // 射箭场：训练弓箭手
     B_STABLE = 8, // 马厩：训练骑兵
     B_TOWER = 9, // 箭塔：自动攻击范围内敌人
-    B_COUNT = 10,
+    B_PALISADE = 10, // 木栅栏：1×1 线性障碍
+    B_GATE = 11, // 木门：1×1 可开关；开 = 己方通行，敌方永远阻挡（需破坏）
+    B_SWORKSHOP = 12, // 攻城工坊：制造攻城槌/投石车
+    B_STONE_WALL = 13, // 石墙：1×1，可驻军 1 单位（墙上状态）
+    B_STONE_GATE = 14, // 石门：1×1 可开关，同木门规则
+    B_COUNT = 15,
 };
 
 // 模拟世界：SoA、确定性、串行状态机 + 并行移动/分离。
@@ -114,14 +124,16 @@ class SimWorld : public godot::RefCounted {
     std::vector<float> move_streak; // 持续全速移动秒数（冲锋动量）
 
     // 本帧攻击事件（渲染特效用，瞬态不序列化）：
-    // [attacker, target, ...]，attacker < 0 表示建筑 -(index+1)
+    // [attacker, target, ...]，attacker/target < 0 表示建筑 -(index+1)
     godot::PackedInt32Array attack_events;
+    godot::PackedInt32Array building_events; // 本帧被摧毁的建筑 index（瞬态）
 
-    // 建筑（序列化范围）：2×2 占地，锚点为左上格
+    // 建筑（序列化范围）：占地 footprint×footprint，锚点为左上格
     std::vector<uint8_t> b_type;
     std::vector<int32_t> b_cell;
     std::vector<float> b_hp;
     std::vector<float> b_timer; // 箭塔射击冷却
+    std::vector<uint8_t> b_state; // 门：1 = 开（默认），0 = 关；其余建筑未用
 
     int64_t stockpile[RES_COUNT] = { 0, 0, 0 };
     int32_t dropoff_cell = -1;
@@ -129,10 +141,13 @@ class SimWorld : public godot::RefCounted {
     // 运行时（不序列化）
     std::vector<float> new_x, new_y;
     std::vector<float> prev_x, prev_y; // 渲染插值
-    std::vector<uint8_t> occupied; // 建筑占地位图（由 b_* 重建）
+    std::vector<int32_t> occupied; // 建筑占地：0 = 空，否则建筑 index+1（由 b_* 重建）
+    std::vector<int32_t> b_garrison; // 各建筑驻军单位 id，-1 = 空（由单位状态重建）
     std::vector<const FlowField *> unit_field; // 本 tick 各单位用的流场
     godot::Ref<GameMap> map;
-    std::unordered_map<int32_t, godot::Ref<FlowField>> field_cache;
+    // 流场按 (目的格, 阵营) 缓存：城门通行性按阵营区分（开门只放行己方）
+    std::unordered_map<int64_t, godot::Ref<FlowField>> field_cache;
+    bool field_cache_dirty = false; // pass 内不可清缓存（unit_field 持裸指针），tick 开头统一清
     std::unique_ptr<ThreadPool> pool;
     godot::Ref<FlowField> flow_field; // 压测：外部整场
 
@@ -144,18 +159,26 @@ class SimWorld : public godot::RefCounted {
     godot::PackedFloat32Array render_buffer;
 
     void resize_arrays(int p_count);
-    const FlowField *ensure_field(int32_t p_goal); // 仅串行 pass 调用
+    const FlowField *ensure_field(int32_t p_goal, uint8_t p_faction); // 仅串行 pass 调用
     void logic_pass(float p_dt); // 串行：状态机/采集/入库
     void move_range(int p_begin, int p_end, float p_dt);
     void separate_range(int p_begin, int p_end);
     void build_grid();
     int32_t cell_of_pos(float p_x, float p_y) const;
+    // 真地形碰撞：不可通行地形/建筑占地 = 实体（开门放行己方）。
+    // worker 线程只读共享状态，可并行调用。
+    bool cell_blocked_for(int p_cx, int p_cy, uint8_t p_faction) const;
     int32_t find_nearest_resource(int32_t p_from_cell, int p_res_type) const;
     bool cell_adjacent(int32_t p_a, int32_t p_b) const;
     int32_t nearest_dropoff(int p_res_type, int32_t p_from_cell) const;
     void mark_occupancy(int p_b_index, uint8_t p_value);
     int32_t find_nearest_enemy(int p_unit, float p_range) const; // 用上一 tick 的空间网格
     void on_unit_killed(int p_victim); // 周边士气结算
+    int32_t find_nearest_blocking_building(int p_unit) const; // 攻城目标：城门优先，串行调用
+    void destroy_building(int p_b);
+    void release_garrison(int p_unit); // 离墙：清驻军占位（换命令/死亡/溃逃时调用）
+    void splash_damage(int p_attacker, float p_x, float p_y); // 投石车溅射（串行调用）
+    godot::Vector2 find_free_spot(godot::Vector2 p_pos, uint8_t p_faction) const; // 出生点防实体格
 
 public:
     void setup(int p_count, float p_world_size, int p_seed, int p_threads);
@@ -170,15 +193,27 @@ public:
     void command_move(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_gather(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_attack(const godot::PackedInt32Array &p_ids, int p_target_id);
+    void command_attack_building(const godot::PackedInt32Array &p_ids, int p_building);
+    bool command_garrison(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
+    bool command_repair(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
+    void despawn_unit(int p_id); // 静默移除（无士气涟漪），槽位可复用
+    int get_unit_faction(int p_id) const;
+    static float unit_max_hp(int p_type); // STATS 表单一来源，GDScript 查询用
     void command_set_formation(const godot::PackedInt32Array &p_ids, int p_formation);
     int get_unit_formation(int p_id) const;
     int get_unit_at(godot::Vector2 p_world_pos, float p_radius, int p_faction) const; // faction -1 = 任意
 
     bool can_place_building(int p_type, godot::Vector2 p_world_pos) const;
     bool place_building(int p_type, godot::Vector2 p_world_pos);
-    godot::PackedInt32Array get_buildings() const; // 扁平 [type, cell, ...]
+    godot::PackedInt32Array get_buildings() const; // 扁平 [type, cell, ...]（含已摧毁，hp<=0）
     float get_building_hp(int p_index) const;
+    int get_building_state(int p_index) const;
+    bool toggle_gate_at(godot::Vector2 p_world_pos); // 开/关己方城门
+    godot::PackedInt32Array take_building_events(); // 取走并清空（本帧摧毁列表）
+    void debug_damage_building(int p_index, float p_damage); // 测试用
     static godot::Vector2i building_cost(int p_type); // (木材, 石料)
+    static int building_footprint(int p_type); // 占地边长（格）
+    static float building_max_hp_of(int p_type); // 血条/修理 UI 用
 
     godot::PackedInt32Array get_units_in_rect(godot::Vector2 p_min, godot::Vector2 p_max) const;
     godot::PackedVector2Array get_unit_positions(const godot::PackedInt32Array &p_ids) const;
