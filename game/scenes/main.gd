@@ -64,7 +64,7 @@ var hud: GameHud
 var place_mode := -1 # 建造放置模式：建筑类型，-1 = 关闭
 var bandit_pos := Vector2.ZERO
 var attack_fx := [] # [{from, to, ttl}]
-var raid_timer := RAID_INTERVAL
+var raid_timer := 150.0 # 首波缓 60s：实测最快民兵 ~150s，90s 接敌是无解窗口
 var raid_count := 0
 var terrain_layer: TileMapLayer # 枯竭地块刷新用
 var raid_units := {} # 袭扰单位 id → 连续空闲检查次数（收尾 AI 用）
@@ -88,6 +88,7 @@ func _ready() -> void:
 	sim.place_building(0, camp_pos) # 营地（免费初始建筑）
 	_add_building_visual(0, camp_cell)
 	sim.spawn_workers(START_WORKERS, camp_pos + Vector2(0, TILE * 2.5))
+	sim.spawn_units(1, 2, camp_pos + Vector2(TILE * 2, TILE * 2.5), 0) # 开局 2 民兵：首波前不至于零反制
 	_spawn_bandit_camp(camp_cell)
 	_sync_unit_mesh()
 
@@ -116,6 +117,9 @@ func _ready() -> void:
 
 
 func _find_camp_cell() -> Vector2i:
+	# 严格档要求 20 格内有森林、60 格内有丘陵：开局经济节奏不随 seed 漂移
+	#（实测有 seed 最近丘陵 126 格 = 单程 68 秒，90 秒采石量为 0）；找不到再放宽
+	var loose := Vector2i(-1, -1)
 	var c := MAP_DIM / 2
 	for r in range(0, MAP_DIM / 2):
 		for oy in range(-r, r + 1):
@@ -130,9 +134,25 @@ func _find_camp_cell() -> Vector2i:
 					for nx in range(-2, 3):
 						if not map.is_passable(c + ox + nx, c + oy + ny):
 							ok = false
-				if ok:
-					return Vector2i(c + ox, c + oy)
-	return Vector2i(c, c)
+				if not ok:
+					continue
+				var cell := Vector2i(c + ox, c + oy)
+				if loose.x < 0:
+					loose = cell # 放宽档兜底（旧行为）
+				if _has_terrain_within(cell, [4, 5], 20) and _has_terrain_within(cell, [6], 60):
+					return cell
+	return loose if loose.x >= 0 else Vector2i(c, c)
+
+
+func _has_terrain_within(from: Vector2i, terrain_ids: Array, radius: int) -> bool:
+	for r in range(1, radius + 1):
+		for oy in range(-r, r + 1):
+			for ox in range(-r, r + 1):
+				if maxi(absi(ox), absi(oy)) != r:
+					continue
+				if map.get_terrain(from.x + ox, from.y + oy) in terrain_ids:
+					return true
+	return false
 
 
 func _spawn_bandit_camp(camp_cell: Vector2i) -> void:
@@ -366,17 +386,22 @@ func _process(delta: float) -> void:
 		if raid_timer <= 0.0 and bandit_pos != Vector2.ZERO:
 			raid_timer = RAID_INTERVAL
 			raid_count += 1
-			var first: int = sim.spawn_units(2, 3, bandit_pos, 1)
-			var n := 3
-			if raid_count % 3 == 0: # 每第三波带一台攻城槌（能破石门）
-				sim.spawn_units(6, 1, bandit_pos + Vector2(0, 48), 1)
-				n = 4
+			# 波次随时间升级：防御建设永远落后半步才有张力（上限 8 防失控）
+			var n := mini(3 + raid_count / 2, 8)
+			var first: int = sim.spawn_units(2, n, bandit_pos, 1)
 			var wave := PackedInt32Array(range(first, first + n))
+			var tag := ""
+			if raid_count % 3 == 0: # 每第三波带攻城槌（破门）
+				wave.append(sim.spawn_units(6, 1, bandit_pos + Vector2(0, 48), 1))
+				tag = "——带着攻城槌！"
+			if raid_count % 5 == 0: # 每第五波带投石车（拆墙 + 溅射）
+				wave.append(sim.spawn_units(7, 1, bandit_pos + Vector2(48, 48), 1))
+				tag = "——带着攻城器械！"
 			sim.command_move(wave, camp_pos)
 			for id in wave:
 				raid_units[id] = 0 # 收尾 AI 跟踪
 			_sync_unit_mesh()
-			hud.notice("⚔ 土匪来袭！" if n == 3 else "⚔ 土匪来袭——带着攻城槌！", 5.0)
+			hud.notice("⚔ 土匪来袭（×%d）%s" % [wave.size(), tag], 5.0)
 		_tick_raid_ai(step)
 
 	sim.write_render_buffer(sim_accum / step) # 插值系数

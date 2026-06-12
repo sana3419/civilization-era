@@ -41,7 +41,7 @@ static inline bool is_siege(uint8_t p_type) {
 
 // 箭塔参数
 static constexpr float TOWER_RANGE = 240.0f;
-static constexpr float TOWER_DAMAGE = 12.0f;
+static constexpr float TOWER_DAMAGE = 9.0f; // 12→9：单塔不再是袭扰全解（实测无伤清全波）
 static constexpr float TOWER_INTERVAL = 1.5f;
 
 static inline bool is_wall(uint8_t p_type) {
@@ -917,8 +917,9 @@ void SimWorld::logic_pass(float p_dt) {
                         const uint32_t cell = uint32_t(gy) * grid_dim + gx;
                         for (uint32_t e = cell_starts[cell]; e < cell_starts[cell + 1]; e++) {
                             const int32_t j = int32_t(cell_entries[e]);
-                            if (!alive[j]) {
-                                continue;
+                            if (!alive[j] || STATS[u_type[j]].aggro_range <= 0.0f) {
+                                continue; // 只数战斗单位：不反击的工人/器械
+                                // 既吓不退人也壮不了胆（否则"工人球"3 秒吓溃土匪）
                             }
                             const float ddx = pos_x[j] - pos_x[i];
                             const float ddy = pos_y[j] - pos_y[i];
@@ -1712,12 +1713,12 @@ Vector2i SimWorld::building_cost(int p_type) { // (木材, 石料)
             return Vector2i(20, 0);
         case B_FARM:
             return Vector2i(10, 0);
-        case B_HOUSE:
-            return Vector2i(15, 5);
+        case B_HOUSE: // 人口门槛建筑不锁石头（开局最近丘陵可能 2 分钟往返）
+            return Vector2i(15, 0);
         case B_STOREHOUSE:
             return Vector2i(30, 10);
-        case B_BARRACKS:
-            return Vector2i(30, 20);
+        case B_BARRACKS: // 第一响应军事不锁石头；石料是塔/马厩/石墙的第二梯队资源
+            return Vector2i(40, 0);
         case B_ARCHERY:
             return Vector2i(25, 10);
         case B_STABLE:
