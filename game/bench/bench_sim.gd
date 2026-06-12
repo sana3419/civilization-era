@@ -29,6 +29,7 @@ func _init() -> void:
 	_bench_siege_engines()
 	_bench_collision()
 	_bench_fixes()
+	_bench_resume_in_battle()
 	_bench_golden()
 
 	print("=== done, failures: %d ===" % failures)
@@ -307,17 +308,13 @@ func _bench_combat() -> void:
 	print("morale: outnumbered militia fled %s" % [
 		_check(fled[0] and fled[1], "morale break"),
 	])
-	# 阵型：盾墙（防 ×1.5）5v5 战果应严格优于同场景无阵型。
-	# 镜像 5v5 是刀尖平衡（先手序/寻路噪声会翻面），用综合分比较：
-	# 己方存活×1000 + 己方残血 + 击杀×500
-	var wn := _run_combat_sim()
-	var ws := _run_shield_sim()
-	var score_s := ws.count_alive(0) * 1000.0 + _team_hp(ws, 5) + (5 - ws.count_alive(1)) * 500.0
-	var score_n := wn.count_alive(0) * 1000.0 + _team_hp(wn, 5) + (5 - wn.count_alive(1)) * 500.0
-	print("formation shield-wall 5v5: 盾墙 %d活/%d杀(分%.0f) vs 无阵型 %d活/%d杀(分%.0f) | %s" % [
-		ws.count_alive(0), 5 - ws.count_alive(1), score_s,
-		wn.count_alive(0), 5 - wn.count_alive(1), score_n,
-		_check(score_s > score_n, "shield wall defense"),
+	# 阵型机制：同一场 1v1 决斗，盾墙（防 ×1.5）方应比无阵型留更多血。
+	# （镜像 5v5 是刀尖平衡，先手序/寻路噪声会翻面，不适合做断言场景）
+	var hp_shield := _run_duel(5)
+	var hp_none := _run_duel(0)
+	print("formation shield-wall duel: 盾墙余血 %.0f vs 无阵型 %.0f | %s" % [
+		hp_shield, hp_none,
+		_check(hp_shield > hp_none and hp_shield > 0.0, "shield wall defense"),
 	])
 	# 骑兵：4 骑兵冲锋（克步兵 ×1.3 + 冲锋首击 ×1.5）应胜 5 土匪
 	var wc := _run_cavalry_sim()
@@ -396,29 +393,18 @@ func _run_tower_sim() -> SimWorld:
 	return w
 
 
-# 前 n 个单位（玩家方按出生序）的存活总血量
-func _team_hp(w: SimWorld, n: int) -> float:
-	var total := 0.0
-	for id in n:
-		if w.is_unit_alive(id):
-			total += w.get_unit_hp(id)
-	return total
-
-
-func _run_shield_sim() -> SimWorld:
-	var map := GameMap.new()
-	map.generate(512, 2026)
-	var w := SimWorld.new()
-	w.setup(0, 16384.0, 1, 6)
-	w.set_map(map)
-	var p := _find_battlefield(map) # 真地形碰撞后不能再硬编码坐标（可能落在水里）
-	var first := w.spawn_units(1, 5, p - Vector2(80, 0), 0)
-	w.spawn_units(2, 5, p + Vector2(80, 0), 1)
-	var ids := PackedInt32Array(range(first, first + 5))
-	w.command_set_formation(ids, 5) # 盾墙
-	for i in 900:
+# 1v1 决斗：民兵（指定阵型）vs 土匪，返回民兵余血（阵亡 = 0）
+func _run_duel(formation: int) -> float:
+	var mw := _new_world()
+	var w: SimWorld = mw[1]
+	var p: Vector2 = _find_battlefield(mw[0])
+	var militia := w.spawn_units(1, 1, p - Vector2(60, 0), 0)
+	var bandit := w.spawn_units(2, 1, p + Vector2(60, 0), 1)
+	w.command_set_formation(PackedInt32Array([militia]), formation)
+	w.command_attack(PackedInt32Array([militia]), bandit)
+	for i in 400:
 		w.tick(0.1)
-	return w
+	return w.get_unit_hp(militia) if w.is_unit_alive(militia) else 0.0
 
 
 # 找一片 9×9 全草地的开阔战场（此前硬编码 (260,260) 其实是深海！）
@@ -769,6 +755,75 @@ func _bench_fixes() -> void:
 		_check(m5.get_terrain(fcell % 512, fcell / 512) == 3, "forest→grass"),
 		_check(ev5.size() == 1 and ev5[0] == fcell, "terrain event"),
 	])
+
+
+# "存→读→续跑" 必须与不存档的延续逐位一致——在真实地图上验证
+# （旧的续跑等价测试跑在无地图 WANDER 模式，空间网格/流场缓存全不参与，
+#  曾漏掉读档后网格失明与枯竭地形缓存陈旧两个分歧源）
+func _bench_resume_in_battle() -> void:
+	# 场景 A：交战中（索敌/士气/溅射全走空间网格）
+	var ha := _run_resume_sim(true)
+	# 场景 B：采集中 + 资源格枯竭（流场缓存按地形重建的一致性）
+	var hb := _run_resume_sim(false)
+	print("resume-in-battle: combat %s | gather+deplete %s" % [
+		_check(ha[0] == ha[1], "combat resume"),
+		_check(hb[0] == hb[1], "gather resume"),
+	])
+
+
+func _run_resume_sim(combat: bool) -> Array:
+	# 续跑基准
+	var mw := _new_world()
+	var m: GameMap = mw[0]
+	var w: SimWorld = mw[1]
+	var pc := Vector2i(_find_battlefield(m) / 32.0)
+	_setup_resume_scene(m, w, pc, combat)
+	for i in 100:
+		w.tick(0.1)
+	var blob: PackedByteArray = w.save_state()
+	var map_blob: PackedByteArray = m.save_state()
+	for i in 60:
+		w.tick(0.1)
+	var h_cont: int = w.state_hash()
+	# 读档续跑
+	var m2 := GameMap.new()
+	m2.generate(512, 2026)
+	if not m2.load_state(map_blob):
+		return [1, 2]
+	var w2 := SimWorld.new()
+	w2.setup(0, 16384.0, 1, 6)
+	w2.set_map(m2)
+	if not w2.load_state(blob):
+		return [1, 2]
+	for i in 60:
+		w2.tick(0.1)
+	return [h_cont, w2.state_hash()]
+
+
+func _setup_resume_scene(m: GameMap, w: SimWorld, pc: Vector2i, combat: bool) -> void:
+	if combat:
+		w.spawn_units(1, 4, Vector2(pc) * 32.0 + Vector2(-64, 16), 0)
+		w.spawn_units(3, 2, Vector2(pc) * 32.0 + Vector2(-96, 48), 0) # 弓手参战
+		w.spawn_units(2, 5, Vector2(pc) * 32.0 + Vector2(64, 16), 1)
+		return
+	# 采集 + 人工把目标格逼近枯竭（第 ~12 次采集触发地形退化）
+	w.set_dropoff(Vector2(pc) * 32.0 + Vector2(16, 16))
+	var f := _find_forest_near(m, pc)
+	m.take_resource_at(f.y * 512 + f.x, maxi(0, m.get_resource_amount(f.x, f.y) - 120))
+	var first := w.spawn_workers(6, Vector2(pc) * 32.0 + Vector2(16, 16))
+	w.command_gather(PackedInt32Array(range(first, first + 6)),
+			Vector2(f) * 32.0 + Vector2(16, 16))
+
+
+func _find_forest_near(m: GameMap, pc: Vector2i) -> Vector2i:
+	for r in range(1, 128):
+		for oy in range(-r, r + 1):
+			for ox in range(-r, r + 1):
+				if maxi(absi(ox), absi(oy)) != r:
+					continue
+				if m.get_terrain(pc.x + ox, pc.y + oy) == 4:
+					return pc + Vector2i(ox, oy)
+	return pc
 
 
 func _bench_golden() -> void:

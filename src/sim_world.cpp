@@ -362,6 +362,7 @@ void SimWorld::command_attack(const PackedInt32Array &p_ids, int p_target_id) {
             continue;
         }
         release_garrison(i);
+        target_cell[i] = -1; // 清残留登墙意图
         if (STATS[u_type[i]].aggro_range <= 0.0f) { // 工人/攻城器械不打单位：移动过去
             state[i] = U_MOVING;
             goal_cell[i] = cell_of_pos(pos_x[p_target_id], pos_y[p_target_id]);
@@ -385,6 +386,7 @@ void SimWorld::command_attack_building(const PackedInt32Array &p_ids, int p_buil
             continue;
         }
         release_garrison(i);
+        target_cell[i] = -1; // 清残留登墙意图
         state[i] = U_ATTACK;
         attack_target[i] = -2 - p_building;
         goal_cell[i] = -1; // 无后续行军目标：拆完待命
@@ -793,6 +795,7 @@ void SimWorld::command_move(const PackedInt32Array &p_ids, Vector2 p_world_pos) 
         float offx = 0.0f, offy = 0.0f;
         formation_offset(form, k, n, offx, offy);
         release_garrison(i);
+        target_cell[i] = -1; // 清残留登墙/采集意图（否则途经墙体会被旧指令吸上墙）
         state[i] = U_MOVING;
         goal_cell[i] = goal;
         slot_x[i] = p_world_pos.x + rx * offx - fx * offy; // offy 为阵后 → 反向于朝向
@@ -825,9 +828,16 @@ void SimWorld::command_gather(const PackedInt32Array &p_ids, Vector2 p_world_pos
         command_move(p_ids, p_world_pos);
         return;
     }
+    PackedInt32Array movers; // 军事/攻城单位不採集：保持阵型移动过去
     for (int k = 0; k < p_ids.size(); k++) {
         const int i = p_ids[k];
-        if (i < 0 || i >= unit_count || state[i] == U_WANDER) {
+        if (i < 0 || i >= unit_count || !alive[i] || state[i] == U_WANDER ||
+                state[i] == U_FLEE) { // 溃逃单位不接受任何劳动指令
+            continue;
+        }
+        if (u_type[i] != UT_WORKER) {
+            // 右键资源地形是 RTS 高频误触：军队点森林意图是行军不是砍树
+            movers.push_back(i);
             continue;
         }
         release_garrison(i);
@@ -835,6 +845,9 @@ void SimWorld::command_gather(const PackedInt32Array &p_ids, Vector2 p_world_pos
         target_cell[i] = cell;
         carry_type[i] = uint8_t(res);
         timer[i] = 0.0f;
+    }
+    if (movers.size() > 0) {
+        command_move(movers, p_world_pos);
     }
 }
 
@@ -970,6 +983,17 @@ void SimWorld::logic_pass(float p_dt) {
                 const int cx = cell % grid_dim, cy = cell / grid_dim;
                 const int gx = goal_cell[i] % grid_dim, gy = goal_cell[i] / grid_dim;
                 if (std::max(std::abs(cx - gx), std::abs(cy - gy)) <= 3) {
+                    // 近目标但目标格被建筑占着（如压向营地的袭扰目标点）：
+                    // 敌军转攻该建筑，否则攻城槌会贴着营地发呆
+                    if (faction[i] != 0 && (st.aggro_range > 0.0f || is_siege(u_type[i])) &&
+                            occupied[goal_cell[i]] != 0) {
+                        const int32_t b = find_nearest_blocking_building(i);
+                        if (b >= 0) {
+                            attack_target[i] = -2 - b;
+                            state[i] = U_ATTACK;
+                            timer[i] = 0.0f;
+                        }
+                    }
                     break; // 近目标：unit_field 留空 → move_range 直线驶向槽位
                 }
                 const FlowField *ff = ensure_field(goal_cell[i], faction[i]);
@@ -1009,7 +1033,15 @@ void SimWorld::logic_pass(float p_dt) {
                     timer[i] += p_dt;
                     if (timer[i] >= GATHER_TIME) {
                         timer[i] = 0.0f;
+                        const uint8_t t_before = map->terrain_at(
+                                target_cell[i] % grid_dim, target_cell[i] / grid_dim);
                         const int got = map->take_resource(size_t(target_cell[i]), GATHER_YIELD);
+                        if (map->terrain_at(target_cell[i] % grid_dim, target_cell[i] / grid_dim) !=
+                                t_before) {
+                            // 枯竭森林退化草地改变移动代价：缓存场已陈旧，延迟到下 tick 清
+                            //（否则与读档后按新地形重建的场分歧）
+                            field_cache_dirty = true;
+                        }
                         if (got > 0) {
                             carry[i] = uint8_t(got);
                             if (nearest_dropoff(carry_type[i], cell) < 0) { // 无存储点：就地入库
@@ -1158,10 +1190,22 @@ void SimWorld::logic_pass(float p_dt) {
                 const int32_t tcell = cell_of_pos(pos_x[t], pos_y[t]);
                 if (std::max(std::abs(cell % grid_dim - tcell % grid_dim),
                             std::abs(cell / grid_dim - tcell / grid_dim)) > 1) {
-                    const FlowField *ff = ensure_field(tcell, faction[i]);
+                    // 追击目标格量化到 4×4 块中心再取场：目标每跨一格就换一张
+                    // 全图场会打爆缓存（单场 ~3MB / 17ms），量化后键稳定 16 倍。
+                    // 中程引导精度足够，末端有 ≤1 格直线 + 射程判定收尾。
+                    const int qx = std::min((tcell % grid_dim) & ~3, grid_dim - 1) + 2;
+                    const int qy = std::min((tcell / grid_dim) & ~3, grid_dim - 1) + 2;
+                    const int32_t qcell = int32_t(std::min(qy, grid_dim - 1)) * grid_dim +
+                            std::min(qx, grid_dim - 1);
+                    const FlowField *ff = ensure_field(qcell, faction[i]);
                     float fdx, fdy;
                     ff->sample_raw(pos_x[i], pos_y[i], fdx, fdy);
-                    if (fdx == 0.0f && fdy == 0.0f) { // 目标不可达（隔墙/隔水）
+                    if (fdx == 0.0f && fdy == 0.0f) {
+                        // 块中心可能恰好落在墙另一侧：精确格二段确认（仅失败时，不打爆缓存）
+                        ff = ensure_field(tcell, faction[i]);
+                        ff->sample_raw(pos_x[i], pos_y[i], fdx, fdy);
+                    }
+                    if (fdx == 0.0f && fdy == 0.0f) { // 目标确实不可达（隔墙/隔水）
                         attack_target[i] = -1;
                         if (goal_cell[i] >= 0) { // 恢复追击前的行军目标
                             state[i] = U_MOVING;
@@ -1325,6 +1369,8 @@ void SimWorld::logic_pass(float p_dt) {
                 alive[best] = 0;
                 on_unit_killed(best);
             }
+        } else {
+            b_timer[b] = 0.0f; // 无目标保持待发，别让冷却下钻成入档的大负数
         }
     }
 }
@@ -1423,8 +1469,10 @@ void SimWorld::move_range(int p_begin, int p_end, float p_dt) {
                 }
             }
         }
-        pos_x[i] = nx;
-        pos_y[i] = ny;
+        // 世界边界显式钳制（负坐标的 int 截断会把 (-32,0) 判为 0 格，
+        // 不能只依赖 separate 阶段的钳制兜底）
+        pos_x[i] = std::clamp(nx, UNIT_RADIUS, world_size - UNIT_RADIUS);
+        pos_y[i] = std::clamp(ny, UNIT_RADIUS, world_size - UNIT_RADIUS);
         // 冲锋动量：持续接近全速移动累积，停顿清零
         const float v2 = vel_x[i] * vel_x[i] + vel_y[i] * vel_y[i];
         if (v2 > 0.25f * spd * spd) {
@@ -1526,6 +1574,10 @@ void SimWorld::separate_range(int p_begin, int p_end) {
 void SimWorld::tick(float p_dt) {
     std::memcpy(prev_x.data(), pos_x.data(), pos_x.size() * sizeof(float));
     std::memcpy(prev_y.data(), pos_y.data(), pos_y.size() * sizeof(float));
+    // 空间网格在 tick 开头从当前位置构建（= 上一 tick 的最终位置）。
+    // 之前在 move 与 separate 之间构建：读档后无法重建出逐位相同的网格
+    //（存档存的是 tick 末位置），"存→读→续跑"在战局中会分歧。
+    build_grid();
     if (field_cache_dirty || field_cache.size() > FIELD_CACHE_MAX) {
         field_cache.clear(); // tick 开头清理，pass 内指针不会悬空
         field_cache_dirty = false;
@@ -1538,7 +1590,6 @@ void SimWorld::tick(float p_dt) {
     }
     logic_pass(p_dt);
     pool->run(unit_count, [&](int b, int e) { move_range(b, e, p_dt); });
-    build_grid();
     pool->run(unit_count, [&](int b, int e) { separate_range(b, e); });
     pos_x.swap(new_x);
     pos_y.swap(new_y);
@@ -1850,7 +1901,7 @@ PackedInt32Array SimWorld::get_buildings() const {
     return out;
 }
 
-// 存档格式 v2：+ 状态机数组 + 库存 + 存储点。
+// 存档格式（版本见 SAVE_VERSION）：头部 + 单位 SoA + 建筑数组，定宽小端。
 // 数据布局变更必须升版本号；golden 基线随逻辑变更重置（删 golden_hash.txt 重新初始化）。
 static constexpr uint32_t SAVE_MAGIC = 0x57564943; // "CIVW" LE
 static constexpr uint32_t SAVE_VERSION = 8; // v8: + 建筑 b_state（门开关/摧毁语义靠 hp）
@@ -1931,7 +1982,23 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
     int32_t count = 0;
     float ws = 0.0f;
     if (!blob_read(p_data, at, &saved_tick, 1) || !blob_read(p_data, at, &count, 1) ||
-            !blob_read(p_data, at, &ws, 1) || count < 0) {
+            !blob_read(p_data, at, &ws, 1) || count < 0 || count > 1000000 ||
+            !(ws > 0.0f) || ws > 1e7f) {
+        return false;
+    }
+    // 整体长度前置校验：通过后所有 blob_read 必然成功，避免 setup() 重置后
+    // 半途失败留下"既非原世界也非存档"的脏状态（截断/坏档的现实情形全在这挡住）。
+    // 字节数与 save_state 字段一一对应（SAVE_VERSION v8），改格式时同步。
+    constexpr size_t UNIT_BYTES = 14 * 4 + 4 + 3 * 4 + 7; // floats + rng + int32×3 + bytes×7
+    constexpr size_t BUILDING_BYTES = 1 + 4 + 4 + 4 + 1; // type/cell/hp/timer/state
+    const size_t nb_at = at + 4 + RES_COUNT * 8 + size_t(count) * UNIT_BYTES;
+    if (p_data.size() < nb_at + 4) {
+        return false;
+    }
+    int32_t n_buildings_peek = 0;
+    std::memcpy(&n_buildings_peek, p_data.ptr() + nb_at, 4);
+    if (n_buildings_peek < 0 || n_buildings_peek > 1000000 ||
+            size_t(p_data.size()) != nb_at + 4 + size_t(n_buildings_peek) * BUILDING_BYTES) {
         return false;
     }
     setup(count, ws, 0, thread_count);
@@ -1981,6 +2048,20 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
             !blob_read(p_data, at, b_state.data(), b_state.size())) {
         return false;
     }
+    // 语义校验：枚举/格号越界即拒载（长度已前置校验，这里挡字节级损坏；
+    // 拒载时世界已被覆盖，调用方应视为不可继续——开发期可接受）
+    for (int i = 0; i < unit_count; i++) {
+        if (u_type[i] >= UT_COUNT || state[i] > U_REPAIR || formation[i] >= F_COUNT ||
+                faction[i] > 1) {
+            return false;
+        }
+    }
+    const int32_t n_cells = int32_t(grid_dim) * grid_dim;
+    for (int b = 0; b < n_buildings; b++) {
+        if (b_type[b] >= B_COUNT || b_cell[b] < 0 || b_cell[b] >= n_cells) {
+            return false;
+        }
+    }
     for (int b = 0; b < n_buildings; b++) { // 重建占地位图（废墟不占地）
         if (b_hp[b] > 0.0f) {
             mark_occupancy(b, 1);
@@ -2014,6 +2095,8 @@ int64_t SimWorld::state_hash() const {
     mix_bytes(pos_x.data(), pos_x.size() * 4);
     mix_bytes(pos_y.data(), pos_y.size() * 4);
     mix_bytes(state.data(), state.size());
+    mix_bytes(rng_state.data(), rng_state.size() * 4); // 慢性分歧最早体现在 RNG 流
+    mix_bytes(attack_target.data(), attack_target.size() * 4);
     mix_bytes(carry.data(), carry.size());
     mix_bytes(stockpile, sizeof(stockpile));
     mix_bytes(hp.data(), hp.size() * 4);

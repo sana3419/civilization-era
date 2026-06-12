@@ -65,8 +65,13 @@ public:
     // 从格子取走至多 p_amount，返回实际取得；枯竭森林退化为草地
     int take_resource(size_t p_cell, int p_amount);
     godot::PackedInt32Array take_terrain_events(); // 取走并清空
-    // GDScript 包装（bench/调试用）
-    int take_resource_at(int p_cell, int p_amount) { return take_resource(size_t(p_cell), p_amount); }
+    // GDScript 包装（bench/调试用）：导出 API 必须有越界守卫
+    int take_resource_at(int p_cell, int p_amount) {
+        if (p_cell < 0 || size_t(p_cell) >= resource_amount.size() || p_amount < 0) {
+            return 0;
+        }
+        return take_resource(size_t(p_cell), p_amount);
+    }
     static int terrain_move_cost(uint8_t p_t);
     // 地形产出的资源类型（RES_*），-1 = 无
     static int terrain_resource(uint8_t p_t);
