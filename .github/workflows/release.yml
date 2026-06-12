@@ -4,9 +4,18 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch: # 云端会话推不了 tag（git 代理只放行工作分支）：手动触发由 CI 建 tag
+    inputs:
+      version:
+        description: "版本号（如 v0.2.0-slice），将作为 tag 与 Release 名"
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+env:
+  VERSION: ${{ inputs.version || github.ref_name }}
 
 jobs:
   windows-release:
@@ -55,14 +64,16 @@ jobs:
         run: |
           mkdir -p build/win64
           godot --headless --path game --export-release "Windows Desktop"
-          (cd build && zip -q -9 -r "civera-${GITHUB_REF_NAME}-win64.zip" win64)
+          (cd build && zip -q -9 -r "civera-${VERSION}-win64.zip" win64)
           rm -rf build/win64 && mkdir -p build/win64
           godot --headless --path game --export-debug "Windows Desktop"
-          (cd build && zip -q -9 -r "civera-${GITHUB_REF_NAME}-win64-debug.zip" win64)
+          (cd build && zip -q -9 -r "civera-${VERSION}-win64-debug.zip" win64)
 
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
           files: build/civera-*.zip
           generate_release_notes: true
           body: |
