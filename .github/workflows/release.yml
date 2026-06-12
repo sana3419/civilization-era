@@ -57,16 +57,20 @@ jobs:
 
       - name: bench 门禁（红了不发版）
         run: |
-          godot --headless --path game --import
+          # --import 完成后编辑器退出时偶发 signal 11（Godot 已知问题），
+          # 导入结果以 bench 能否跑通为准（build.yml 同款处理）
+          godot --headless --path game --import || true
           godot --headless --path game -s bench/bench_sim.gd
 
       - name: 导出 Windows 包
         run: |
           mkdir -p build/win64
-          godot --headless --path game --export-release "Windows Desktop"
+          godot --headless --path game --export-release "Windows Desktop" || true
+          test -f build/win64/civilization-era.exe # 产物存在性即成功（退出码可能被退出崩溃污染）
           (cd build && zip -q -9 -r "civera-${VERSION}-win64.zip" win64)
           rm -rf build/win64 && mkdir -p build/win64
-          godot --headless --path game --export-debug "Windows Desktop"
+          godot --headless --path game --export-debug "Windows Desktop" || true
+          test -f build/win64/civilization-era.exe
           (cd build && zip -q -9 -r "civera-${VERSION}-win64-debug.zip" win64)
 
       - name: 创建 Release
