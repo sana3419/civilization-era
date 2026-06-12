@@ -17,6 +17,8 @@ var fps_samples: Array[float] = []
 
 
 func _ready() -> void:
+	# 压测要测真实上限：关 vsync（游戏正常运行时项目设置为开）
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	world = SimWorld.new()
 	world.setup(N, WORLD, 12345, 6)
 

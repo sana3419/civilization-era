@@ -57,8 +57,13 @@ var building_layer := Node2D.new()
 var sim_accum := 0.0
 var selected := PackedInt32Array()
 var groups := {}
-var dragging := false
+var panning := false # 左键拖动地图
+var pan_dist := 0.0
+var left_anchor := Vector2.ZERO # 左键按下时世界坐标（短击 = 点选）
+var box_selecting := false # 右键拖动框选
 var drag_anchor := Vector2.ZERO
+var overlay := Node2D.new() # 覆盖层：橡皮筋/血条/选中圈/特效（置于地图之上）
+var deco_layer: TileMapLayer
 var camp_pos := Vector2.ZERO
 var hud: GameHud
 var place_mode := -1 # 建造放置模式：建筑类型，-1 = 关闭
@@ -107,6 +112,11 @@ func _ready() -> void:
 	ghost.size = Vector2(TILE * 2, TILE * 2)
 	ghost.visible = false
 	add_child(ghost)
+
+	# 覆盖层最后加入 → 渲染在地图/建筑/单位之上（父节点 _draw 会被子节点盖住）
+	overlay.z_index = 50
+	overlay.draw.connect(_draw_overlay)
+	add_child(overlay)
 
 	if OS.get_environment("CIVERA_SHOT") != "":
 		selected = PackedInt32Array(range(START_WORKERS))
@@ -204,12 +214,114 @@ func _build_tilemap() -> void:
 
 	terrain_layer = TileMapLayer.new()
 	terrain_layer.tile_set = ts
+	_build_deco_layer()
 	var buf := map.get_terrain_buffer()
 	for cy in MAP_DIM:
 		var row := cy * MAP_DIM
 		for cx in MAP_DIM:
 			terrain_layer.set_cell(Vector2i(cx, cy), 0, Vector2i(buf[row + cx], 0))
+			_set_deco_cell(Vector2i(cx, cy), buf[row + cx])
 	add_child(terrain_layer)
+	add_child(deco_layer) # 装饰层在地形之上、建筑/单位之下
+
+
+# 地形 → 装饰图集行（树/草丛/岩石等程序化像素占位）
+const DECO_ROW := { 3: 0, 4: 1, 5: 2, 6: 3, 8: 4, 9: 5 } # 草地/森林/密林/丘陵/沙漠/沼泽
+
+
+func _set_deco_cell(tc: Vector2i, terrain: int) -> void:
+	var row: int = DECO_ROW.get(terrain, -1)
+	# 确定性视觉散布：草地 1/3 概率长草丛，其余地形全铺
+	var h := absi((tc.x * 73856093) ^ (tc.y * 19349663))
+	if row < 0 or (terrain == 3 and h % 3 != 0):
+		deco_layer.erase_cell(tc)
+		return
+	deco_layer.set_cell(tc, 0, Vector2i(h % 4 * 2, row)) # 偶数列为动画基帧
+
+
+# 装饰图集：4 变体 × 2 动画帧（横向相邻），6 行地形。
+# TileSet 原生帧动画：树冠摆动/草丛弯腰/水洼闪烁，GPU 播放零运行时开销。
+func _build_deco_layer() -> void:
+	var img := Image.create(TILE * 8, TILE * 6, false, Image.FORMAT_RGBA8)
+	for v in 4:
+		for f in 2: # f=1 为摆动帧
+			var bx := (v * 2 + f) * TILE
+			var dx := (v * 7) % 12
+			var dy := (v * 5) % 10
+			# 行0 草丛
+			_px_tuft(img, bx + 8 + dx, 14 + dy, f)
+			if v % 2 == 0:
+				_px_tuft(img, bx + 20, 22, f)
+			# 行1 森林：1-2 棵树
+			_px_tree(img, bx + 4 + dx % 8, TILE + 4, Color("2c5a28"), Color("1d3f1b"), f)
+			if v >= 2:
+				_px_tree(img, bx + 17, TILE + 12, Color("36692f"), Color("234a20"), 1 - f)
+			# 行2 密林：2-3 棵更深的树（相位交错，风感更自然）
+			_px_tree(img, bx + 2, 2 * TILE + 2, Color("1d3f1b"), Color("122a11"), f)
+			_px_tree(img, bx + 15, 2 * TILE + 8 + dy % 6, Color("234a20"), Color("122a11"), 1 - f)
+			if v % 2 == 1:
+				_px_tree(img, bx + 8, 2 * TILE + 14, Color("1d3f1b"), Color("122a11"), f)
+			# 行3 丘陵：岩石（不动画）
+			_px_rock(img, bx + 6 + dx, 3 * TILE + 16 + dy % 6)
+			_px_rock(img, bx + 18, 3 * TILE + 8)
+			# 行4 沙漠：变体0 仙人掌（微摆），其余沙纹（飘移 1px）
+			if v == 0:
+				_px_cactus(img, bx + 13, 4 * TILE + 6, f)
+			else:
+				for k in 2:
+					img.fill_rect(Rect2i(bx + 4 + k * 12 + f, 4 * TILE + 12 + k * 8 + dy % 4, 9, 1), Color("c9b15f"))
+			# 行5 沼泽：芦苇（弯腰）+ 水洼（闪烁）
+			for k in 3:
+				img.fill_rect(Rect2i(bx + 6 + k * 7 + (f if k % 2 == 0 else 0), 5 * TILE + 10 + (k + v) % 5, 1, 7), Color("2f4a26"))
+			img.fill_rect(Rect2i(bx + 10 + dx % 8, 5 * TILE + 22, 7, 3),
+					Color("3a5a78") if f == 0 else Color("46688a"))
+
+	var src := TileSetAtlasSource.new()
+	src.texture = ImageTexture.create_from_image(img)
+	src.texture_region_size = Vector2i(TILE, TILE)
+	for v in 4:
+		for r in 6:
+			var at := Vector2i(v * 2, r)
+			src.create_tile(at)
+			if r == 3:
+				continue # 岩石不动画
+			src.set_tile_animation_frames_count(at, 2)
+			# 各变体周期错开，避免全图同步摆动
+			var dur := 0.55 + 0.1 * v
+			src.set_tile_animation_frame_duration(at, 0, dur)
+			src.set_tile_animation_frame_duration(at, 1, dur * 0.85)
+	var ts := TileSet.new()
+	ts.tile_size = Vector2i(TILE, TILE)
+	ts.add_source(src, 0)
+	deco_layer = TileMapLayer.new()
+	deco_layer.tile_set = ts
+
+
+func _px_tree(img: Image, x: int, y: int, canopy: Color, dark: Color, sway: int) -> void:
+	img.fill_rect(Rect2i(x + 5, y + 12, 3, 5), Color("5a4026")) # 树干（不动）
+	img.fill_rect(Rect2i(x + 1, y + 7, 11, 5), canopy) # 下层树冠
+	img.fill_rect(Rect2i(x + 3 + sway, y + 3, 7, 5), canopy) # 中上层随风偏移
+	img.fill_rect(Rect2i(x + 5 + sway, y, 3, 4), dark)
+	img.fill_rect(Rect2i(x + 1, y + 11, 11, 1), dark)
+
+
+func _px_tuft(img: Image, x: int, y: int, sway: int) -> void:
+	for k in 4:
+		var bend := sway if k % 2 == 0 else 0 # 一半草叶弯腰
+		img.fill_rect(Rect2i(x + k * 2 + bend, y - (k % 2) * 2, 1, 4 + (k % 2) * 2), Color("4d7a35"))
+
+
+func _px_rock(img: Image, x: int, y: int) -> void:
+	img.fill_rect(Rect2i(x + 1, y, 6, 4), Color("8f8f8f"))
+	img.fill_rect(Rect2i(x, y + 2, 8, 3), Color("6e6e6e"))
+
+
+func _px_cactus(img: Image, x: int, y: int, sway: int) -> void:
+	img.fill_rect(Rect2i(x, y + 6, 3, 16), Color("3a7a3a"))
+	img.fill_rect(Rect2i(x - 5, y + 10, 5, 2), Color("3a7a3a"))
+	img.fill_rect(Rect2i(x - 5, y + 6 - sway, 2, 6 + sway), Color("3a7a3a"))
+	img.fill_rect(Rect2i(x + 3, y + 13, 4, 2), Color("3a7a3a"))
+	img.fill_rect(Rect2i(x + 6, y + 8 - sway, 2, 7 + sway), Color("3a7a3a"))
 
 
 func _add_building_visual(type: int, anchor_cell: Vector2i, open := true) -> void:
@@ -385,13 +497,14 @@ func _train_unit(t: Dictionary) -> void:
 	hud.notice("需要先建%s" % BUILDINGS[t["building"]]["name"])
 
 
-# 读档后全量重刷地形贴图与小地图（枯竭草地与初始生成不同）
+# 读档后全量重刷地形贴图/装饰/小地图（枯竭草地与初始生成不同）
 func _refresh_terrain_visuals() -> void:
 	var buf := map.get_terrain_buffer()
 	for cy in MAP_DIM:
 		var row := cy * MAP_DIM
 		for cx in MAP_DIM:
 			terrain_layer.set_cell(Vector2i(cx, cy), 0, Vector2i(buf[row + cx], 0))
+			_set_deco_cell(Vector2i(cx, cy), buf[row + cx])
 	hud.refresh_minimap()
 
 
@@ -418,7 +531,7 @@ func _process(delta: float) -> void:
 
 	if paused or game_over != "":
 		sim_accum = 0.0
-		queue_redraw()
+		overlay.queue_redraw()
 		return
 	sim_accum += delta * (20.0 if OS.get_environment("CIVERA_SHOT") != "" else 1.0)
 	var step := 1.0 / SIM_HZ
@@ -461,16 +574,20 @@ func _process(delta: float) -> void:
 		var from_pos := _event_pos(events[e], flat_b)
 		var to_pos := _event_pos(events[e + 1], flat_b)
 		attack_fx.append({ "from": from_pos, "to": to_pos, "ttl": 0.25 })
+	if attack_fx.size() > 300: # 大型混战限流，防覆盖层绘制拖帧
+		attack_fx = attack_fx.slice(attack_fx.size() - 300)
 	var bev := sim.take_building_events()
 	if bev.size() > 0: # 有建筑被摧毁，重画
 		_rebuild_building_visuals()
 		if 0 in bev: # 初始营地（building 0）被拆 = 战败
 			_game_over(false)
-	var tev := map.take_terrain_events() # 枯竭森林→草地：刷贴图与小地图
+	var tev := map.take_terrain_events() # 枯竭森林→草地：刷贴图/装饰/小地图
 	if tev.size() > 0:
 		for cell in tev:
 			var tc := Vector2i(cell % MAP_DIM, cell / MAP_DIM)
-			terrain_layer.set_cell(tc, 0, Vector2i(map.get_terrain(tc.x, tc.y), 0))
+			var t := map.get_terrain(tc.x, tc.y)
+			terrain_layer.set_cell(tc, 0, Vector2i(t, 0))
+			_set_deco_cell(tc, t) # 树砍光 → 树木消失
 			hud.set_minimap_pixel(tc)
 		hud.commit_minimap()
 	for fx in attack_fx:
@@ -491,7 +608,7 @@ func _process(delta: float) -> void:
 				keep.append(id)
 		selected = keep
 	hud.update(delta)
-	queue_redraw()
+	overlay.queue_redraw()
 
 	if OS.get_environment("CIVERA_SHOT") != "":
 		shot_timer += delta
@@ -519,10 +636,11 @@ func _event_pos(id: int, flat_b: PackedInt32Array) -> Vector2:
 	return Vector2(bcell % MAP_DIM, bcell / MAP_DIM) * TILE + Vector2(half, half)
 
 
-func _draw() -> void:
+# 覆盖层绘制（独立子节点，渲染在地图/建筑/单位之上）
+func _draw_overlay() -> void:
 	for fx in attack_fx:
 		var a: float = fx["ttl"] / 0.25
-		draw_line(fx["from"], fx["to"], Color(1.0, 0.9, 0.4, a), 1.5)
+		overlay.draw_line(fx["from"], fx["to"], Color(1.0, 0.9, 0.4, a), 1.5)
 	# 受损单位无条件画血条（乱战可读性：不选中也得知道该撤谁）
 	var all_ids := PackedInt32Array(range(sim.get_unit_count()))
 	var all_pts := sim.get_unit_positions(all_ids)
@@ -533,8 +651,8 @@ func _draw() -> void:
 		if ratio >= 1.0:
 			continue
 		var p := all_pts[id]
-		draw_rect(Rect2(p + Vector2(-9, -15), Vector2(18, 3)), Color(0, 0, 0, 0.7))
-		draw_rect(Rect2(p + Vector2(-9, -15), Vector2(18 * ratio, 3)),
+		overlay.draw_rect(Rect2(p + Vector2(-9, -15), Vector2(18, 3)), Color(0, 0, 0, 0.7))
+		overlay.draw_rect(Rect2(p + Vector2(-9, -15), Vector2(18 * ratio, 3)),
 				Color(1.0 - ratio, ratio, 0.1))
 	# 受损建筑血条（土匪啃门时玩家必须看得见门在掉血）
 	var flat_b := sim.get_buildings()
@@ -546,8 +664,8 @@ func _draw() -> void:
 		var cell := flat_b[b * 2 + 1]
 		var bw: float = SimWorld.building_size(flat_b[b * 2]) * TILE
 		var bp := Vector2(cell % MAP_DIM, cell / MAP_DIM) * TILE
-		draw_rect(Rect2(bp + Vector2(0, -6), Vector2(bw, 4)), Color(0, 0, 0, 0.7))
-		draw_rect(Rect2(bp + Vector2(0, -6), Vector2(bw * bhp / bmax, 4)),
+		overlay.draw_rect(Rect2(bp + Vector2(0, -6), Vector2(bw, 4)), Color(0, 0, 0, 0.7))
+		overlay.draw_rect(Rect2(bp + Vector2(0, -6), Vector2(bw * bhp / bmax, 4)),
 				Color(1.0 - bhp / bmax, bhp / bmax, 0.1))
 	if selected.size() > 0:
 		var pts := sim.get_unit_positions(selected)
@@ -555,11 +673,11 @@ func _draw() -> void:
 			var id := selected[k]
 			if not sim.is_unit_alive(id):
 				continue
-			draw_arc(pts[k], 11.0, 0, TAU, 24, Color(0.3, 1.0, 0.3, 0.9), 2.0)
-	if dragging:
+			overlay.draw_arc(pts[k], 11.0, 0, TAU, 24, Color(0.3, 1.0, 0.3, 0.9), 2.0)
+	if box_selecting:
 		var rect := _drag_rect()
-		draw_rect(rect, Color(0.4, 1.0, 0.4, 0.12), true)
-		draw_rect(rect, Color(0.4, 1.0, 0.4, 0.9), false, 2.0 / camera.zoom.x)
+		overlay.draw_rect(rect, Color(0.4, 1.0, 0.4, 0.12), true)
+		overlay.draw_rect(rect, Color(0.4, 1.0, 0.4, 0.9), false, 2.0 / camera.zoom.x)
 
 
 func _select_all(workers: bool) -> PackedInt32Array:
@@ -576,13 +694,19 @@ func _drag_rect() -> Rect2:
 	return Rect2(drag_anchor, cur - drag_anchor).abs()
 
 
+# 操控方案：左键拖动 = 平移地图，左键短击 = 点选/开关门；
+# 右键拖动 = 框选，右键短击 = 命令（集火/登墙/修理/采集/移动）
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseMotion and place_mode in WALL_TYPES \
-			and event.button_mask & MOUSE_BUTTON_MASK_LEFT:
-		# 墙体拖动连放（按住左键划线）
-		var cell := Vector2i(get_global_mouse_position() / TILE)
-		if sim.place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1)):
-			_add_building_visual(place_mode, cell)
+	if event is InputEventMouseMotion:
+		if place_mode in WALL_TYPES and event.button_mask & MOUSE_BUTTON_MASK_LEFT:
+			# 墙体拖动连放（按住左键划线）
+			var cell := Vector2i(get_global_mouse_position() / TILE)
+			if sim.place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1)):
+				_add_building_visual(place_mode, cell)
+			return
+		if panning:
+			camera.position -= event.relative / camera.zoom.x
+			pan_dist += event.relative.length()
 		return
 	if event is InputEventMouseButton:
 		if event.pressed:
@@ -600,33 +724,42 @@ func _unhandled_input(event: InputEvent) -> void:
 							if not Input.is_key_pressed(KEY_SHIFT) and place_mode not in WALL_TYPES:
 								_exit_place_mode()
 					else:
-						dragging = true
-						drag_anchor = get_global_mouse_position()
+						panning = true
+						pan_dist = 0.0
+						left_anchor = get_global_mouse_position()
 				MOUSE_BUTTON_RIGHT:
 					if place_mode >= 0:
 						_exit_place_mode()
-					elif selected.size() > 0:
-						var pos := get_global_mouse_position()
-						var enemy: int = sim.get_unit_at(pos, 20.0, 1)
-						if enemy >= 0: # 点敌人 = 集火
-							sim.command_attack(selected, enemy)
-						elif sim.command_garrison(selected, pos):
-							pass # 点己方石墙 = 派一人登墙驻守（士兵）
-						elif sim.command_repair(selected, pos):
-							pass # 点受损建筑 = 工人修理
-						else:
-							sim.command_gather(selected, pos)
-		elif event.button_index == MOUSE_BUTTON_LEFT and dragging:
-			dragging = false
-			var rect := _drag_rect()
-			var is_click := rect.size.length() < 8.0
-			if is_click:
-				rect = Rect2(rect.position - Vector2(12, 12), Vector2(24, 24))
-			selected = sim.get_units_in_rect(rect.position, rect.end)
-			# 空点己方城门 = 开/关切换
-			if is_click and selected.size() == 0 \
-					and sim.toggle_gate_at(get_global_mouse_position()):
-				_rebuild_building_visuals()
+					else:
+						box_selecting = true
+						drag_anchor = get_global_mouse_position()
+		else:
+			match event.button_index:
+				MOUSE_BUTTON_LEFT:
+					if panning:
+						panning = false
+						if pan_dist < 8.0: # 短击 = 点选 / 开关门
+							var rect := Rect2(left_anchor - Vector2(12, 12), Vector2(24, 24))
+							selected = sim.get_units_in_rect(rect.position, rect.end)
+							if selected.size() == 0 and sim.toggle_gate_at(left_anchor):
+								_rebuild_building_visuals()
+				MOUSE_BUTTON_RIGHT:
+					if box_selecting:
+						box_selecting = false
+						var rect := _drag_rect()
+						if rect.size.length() >= 8.0: # 拖动 = 框选
+							selected = sim.get_units_in_rect(rect.position, rect.end)
+						elif selected.size() > 0: # 短击 = 命令
+							var pos := get_global_mouse_position()
+							var enemy: int = sim.get_unit_at(pos, 20.0, 1)
+							if enemy >= 0: # 点敌人 = 集火
+								sim.command_attack(selected, enemy)
+							elif sim.command_garrison(selected, pos):
+								pass # 点己方石墙 = 派一人登墙驻守（士兵）
+							elif sim.command_repair(selected, pos):
+								pass # 点受损建筑 = 工人修理
+							else:
+								sim.command_gather(selected, pos)
 
 
 func _unhandled_key_input(event: InputEvent) -> void:

@@ -18,7 +18,7 @@ window/size/viewport_height=720
 
 [display]
 
-window/vsync/vsync_mode=0
+window/vsync/vsync_mode=1
 
 [rendering]
 

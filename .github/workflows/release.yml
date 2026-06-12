@@ -57,7 +57,9 @@ jobs:
 
       - name: bench 门禁（红了不发版）
         run: |
-          godot --headless --path game --import
+          # 首次 import 会因项目字体先于导入加载而非零退出（与 build.yml 同样容错）；
+          # 真正的门禁是 bench 的退出码
+          godot --headless --path game --import || true
           godot --headless --path game -s bench/bench_sim.gd
 
       - name: 导出 Windows 包

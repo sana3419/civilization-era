@@ -83,7 +83,7 @@ func pop_cap() -> int:
 func update(delta: float) -> void:
 	notice_ttl -= delta
 	text_accum += delta
-	if text_accum >= 0.2: # 状态行每秒 5 次足够
+	if text_accum >= 0.2: # 状态行每秒 5 次足够；小地图同节流（全量重绘成本高）
 		text_accum = 0.0
 		var sim: SimWorld = main.sim
 		res_label.text = "木材 %d  石料 %d  食物 %d  人口 %d/%d" % [
@@ -91,7 +91,7 @@ func update(delta: float) -> void:
 			sim.count_alive(0), pop_cap(),
 		]
 		info_label.text = _status_line()
-	minimap.queue_redraw()
+		minimap.queue_redraw()
 
 
 # 底部状态行：通知 | 选中详情 | 悬停地块 | 全局态势
