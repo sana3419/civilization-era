@@ -91,6 +91,8 @@ func _ready() -> void:
 	sim = SimWorld.new()
 	sim.setup(0, MAP_DIM * TILE, 1, 6)
 	sim.set_map(map)
+	# 初始资源（DESIGN.md 系统十九：木 200 / 石 100 / 食 300，金币待经济系统）
+	sim.debug_add_resources(200, 100, 300)
 
 	var camp_cell := _find_camp_cell()
 	camp_pos = Vector2(camp_cell) * TILE + Vector2(TILE, TILE)
