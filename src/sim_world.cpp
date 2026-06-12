@@ -502,6 +502,10 @@ int SimWorld::get_unit_at(Vector2 p_world_pos, float p_radius, int p_faction) co
 
 // 死亡的士气涟漪：200px 内友军 -8，敌军 +4（用上一 tick 网格，串行调用）
 void SimWorld::on_unit_killed(int p_victim) {
+    death_events.push_back(u_type[p_victim]);
+    death_events.push_back(faction[p_victim]);
+    death_events.push_back(int32_t(pos_x[p_victim]));
+    death_events.push_back(int32_t(pos_y[p_victim]));
     if (state[p_victim] == U_GARRISON) { // 阵亡腾出驻位
         const int b = -2 - target_cell[p_victim];
         if (b >= 0 && b < int(b_garrison.size()) && b_garrison[b] == p_victim) {
@@ -1693,6 +1697,12 @@ PackedInt32Array SimWorld::take_attack_events() {
     return out;
 }
 
+PackedInt32Array SimWorld::take_death_events() {
+    PackedInt32Array out = death_events;
+    death_events.clear();
+    return out;
+}
+
 int SimWorld::count_alive(int p_faction) const {
     int n = 0;
     for (int i = 0; i < unit_count; i++) {
@@ -1861,6 +1871,42 @@ bool SimWorld::place_building(int p_type, Vector2 p_world_pos) {
     b_garrison.push_back(-1);
     mark_occupancy(int(b_cell.size()) - 1, 1);
     field_cache.clear(); // 占地变化，全部流场失效（tick 间调用，无悬空指针）
+
+    // 排出站在占地内的单位（否则被地形碰撞困死在格子里）
+    const int32_t anchor = b_cell.back();
+    const int fp = building_footprint(uint8_t(p_type));
+    const int bx = anchor % grid_dim, by = anchor / grid_dim;
+    for (int i = 0; i < unit_count; i++) {
+        if (!alive[i]) {
+            continue;
+        }
+        const int32_t c = cell_of_pos(pos_x[i], pos_y[i]);
+        const int cx = c % grid_dim, cy = c / grid_dim;
+        if (cx < bx || cx >= bx + fp || cy < by || cy >= by + fp) {
+            continue;
+        }
+        bool moved = false;
+        for (int r = 1; r <= 6 && !moved; r++) { // 环形找最近空位（确定性顺序）
+            for (int oy = -r; oy <= r && !moved; oy++) {
+                for (int ox = -r; ox <= r && !moved; ox++) {
+                    if (std::max(std::abs(ox), std::abs(oy)) != r) {
+                        continue;
+                    }
+                    const int nx = cx + ox, ny = cy + oy;
+                    if (nx < 0 || nx >= grid_dim || ny < 0 || ny >= grid_dim ||
+                            !map->is_passable(nx, ny) ||
+                            occupied[size_t(ny) * grid_dim + nx]) {
+                        continue;
+                    }
+                    pos_x[i] = float(nx) * CELL_SIZE + CELL_SIZE * 0.5f;
+                    pos_y[i] = float(ny) * CELL_SIZE + CELL_SIZE * 0.5f;
+                    prev_x[i] = pos_x[i];
+                    prev_y[i] = pos_y[i];
+                    moved = true;
+                }
+            }
+        }
+    }
     return true;
 }
 
@@ -2175,6 +2221,7 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("is_unit_alive", "id"), &SimWorld::is_unit_alive);
     ClassDB::bind_method(D_METHOD("count_alive", "faction"), &SimWorld::count_alive);
     ClassDB::bind_method(D_METHOD("take_attack_events"), &SimWorld::take_attack_events);
+    ClassDB::bind_method(D_METHOD("take_death_events"), &SimWorld::take_death_events);
     ClassDB::bind_method(D_METHOD("command_attack", "ids", "target_id"), &SimWorld::command_attack);
     ClassDB::bind_method(D_METHOD("get_unit_at", "world_pos", "radius", "faction"), &SimWorld::get_unit_at);
     ClassDB::bind_method(D_METHOD("count_state", "state", "faction"), &SimWorld::count_state);

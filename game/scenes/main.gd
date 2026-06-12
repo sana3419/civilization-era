@@ -71,6 +71,7 @@ var hud: GameHud
 var place_mode := -1 # 建造放置模式：建筑类型，-1 = 关闭
 var bandit_pos := Vector2.ZERO
 var attack_fx := [] # [{from, to, ttl}]
+var death_fx := [] # [{pos, ttl}] 阵亡标记淡出（"走一半消失"的死亡反馈）
 var raid_timer := 150.0 # 首波缓 60s：实测最快民兵 ~150s，90s 接敌是无解窗口
 var raid_count := 0
 var paused := false
@@ -115,12 +116,16 @@ func _ready() -> void:
 
 	ghost.size = Vector2(TILE * 2, TILE * 2)
 	ghost.visible = false
+	ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE # 幽灵不吞放置点击！
 	add_child(ghost)
 
 	# 覆盖层最后加入 → 渲染在地图/建筑/单位之上（父节点 _draw 会被子节点盖住）
 	overlay.z_index = 50
 	overlay.draw.connect(_draw_overlay)
 	add_child(overlay)
+
+	if OS.get_environment("CIVERA_UITEST") != "":
+		uitest_active = true
 
 	if OS.get_environment("CIVERA_SHOT") != "":
 		set_selection(PackedInt32Array(range(START_WORKERS)))
@@ -332,6 +337,7 @@ func _add_building_visual(type: int, anchor_cell: Vector2i, open := true) -> voi
 	var bsize: int = SimWorld.building_size(type)
 	var is_gate := type == 11 or type == 14
 	var rect := ColorRect.new()
+	rect.mouse_filter = Control.MOUSE_FILTER_IGNORE # 不吞世界点击（选建筑走 sim 查询）
 	rect.color = BUILDINGS[type]["color"]
 	if is_gate and not open: # 关闭的城门加深
 		rect.color = rect.color.darkened(0.45)
@@ -581,6 +587,22 @@ func _process(delta: float) -> void:
 		attack_fx.append({ "from": from_pos, "to": to_pos, "ttl": 0.25 })
 	if attack_fx.size() > 300: # 大型混战限流，防覆盖层绘制拖帧
 		attack_fx = attack_fx.slice(attack_fx.size() - 300)
+
+	# 阵亡反馈：尸体 ☠ 淡出 + 我方损失通知（修复"单位走一半凭空消失"的观感）
+	var deaths := sim.take_death_events()
+	var lost := {}
+	for e in range(0, deaths.size(), 4):
+		death_fx.append({ "pos": Vector2(deaths[e + 2], deaths[e + 3]), "ttl": 1.2 })
+		if deaths[e + 1] == 0:
+			lost[deaths[e]] = lost.get(deaths[e], 0) + 1
+	if lost.size() > 0:
+		var bits := PackedStringArray()
+		for t in lost:
+			bits.append("%s×%d" % [GameHud.UNIT_NAMES[t], lost[t]])
+		hud.notice("☠ 损失 " + " ".join(bits), 4.0)
+	for fx in death_fx:
+		fx["ttl"] -= delta
+	death_fx = death_fx.filter(func(fx): return fx["ttl"] > 0.0)
 	var bev := sim.take_building_events()
 	if bev.size() > 0: # 有建筑被摧毁，重画
 		_rebuild_building_visuals()
@@ -617,6 +639,8 @@ func _process(delta: float) -> void:
 		set_selected_building(-1) # 选中建筑被摧毁
 	hud.update(delta)
 	overlay.queue_redraw()
+	if uitest_active:
+		_uitest_tick(delta)
 
 	if OS.get_environment("CIVERA_SHOT") != "":
 		shot_timer += delta
@@ -649,6 +673,11 @@ func _draw_overlay() -> void:
 	for fx in attack_fx:
 		var a: float = fx["ttl"] / 0.25
 		overlay.draw_line(fx["from"], fx["to"], Color(1.0, 0.9, 0.4, a), 1.5)
+	for fx in death_fx: # 阵亡 ✕ 标记
+		var da: float = fx["ttl"] / 1.2
+		var p: Vector2 = fx["pos"]
+		overlay.draw_line(p + Vector2(-6, -6), p + Vector2(6, 6), Color(0.15, 0.1, 0.1, da), 2.5)
+		overlay.draw_line(p + Vector2(-6, 6), p + Vector2(6, -6), Color(0.15, 0.1, 0.1, da), 2.5)
 	# 受损单位无条件画血条（乱战可读性：不选中也得知道该撤谁）
 	var all_ids := PackedInt32Array(range(sim.get_unit_count()))
 	var all_pts := sim.get_unit_positions(all_ids)
@@ -707,8 +736,8 @@ func _select_all(workers: bool) -> PackedInt32Array:
 	return out
 
 
-func _drag_rect() -> Rect2:
-	var cur := get_global_mouse_position()
+func _drag_rect(end := Vector2.INF) -> Rect2:
+	var cur := get_global_mouse_position() if end == Vector2.INF else end
 	return Rect2(drag_anchor, cur - drag_anchor).abs()
 
 
@@ -749,13 +778,129 @@ func _set_formation(f: int) -> void:
 	hud.notice("阵型：" + FORMATION_NAMES[f])
 
 
+# ---- UI 自动化测试（CIVERA_UITEST=1）：注入真实 InputEvent 验证点击链路 ----
+# 复现试玩 bug 用：放置点击无反应 / 行军渲染消失。结果打印 [uitest]。
+
+var uitest_active := false
+var uitest_step := 0
+var uitest_timer := 0.0
+var uitest_fail := 0
+var uitest_click_btn := -1
+var uitest_click_delay := 0.0
+
+
+# 直接注入带坐标的事件（输入处理器使用事件坐标，无需真实光标配合）
+func _uitest_click(world_pos: Vector2, button: int) -> void:
+	var screen: Vector2 = get_viewport().get_canvas_transform() * world_pos
+	for pressed in [true, false]:
+		var ev := InputEventMouseButton.new()
+		ev.button_index = button
+		ev.pressed = pressed
+		ev.position = screen
+		ev.global_position = screen
+		Input.parse_input_event(ev)
+
+
+func _uitest_check(ok: bool, what: String) -> void:
+	if not ok:
+		uitest_fail += 1
+	print("[uitest] %s: %s" % [what, "PASS" if ok else "FAIL"])
+
+
+func _uitest_tick(delta: float) -> void:
+	uitest_timer += delta
+	match uitest_step:
+		0: # 1s 后：左键点选一个工人
+			if uitest_timer > 1.0:
+				uitest_step = 1
+				uitest_timer = 0.0
+				var wp: Vector2 = sim.get_unit_positions(PackedInt32Array([0]))[0]
+				_uitest_click(wp, MOUSE_BUTTON_LEFT)
+		1: # 验证点选；然后点选营地建筑
+			if uitest_timer > 0.5:
+				_uitest_check(selected.size() > 0, "左键点选工人")
+				uitest_step = 2
+				uitest_timer = 0.0
+				# 点占地上缘中心（warp 有 ±11px 误差，且工人聚在建筑下方）
+				_uitest_click(camp_pos + Vector2(TILE, 12), MOUSE_BUTTON_LEFT)
+		2: # 验证建筑点选；进入放置模式并左键点击放置（空地）
+			if uitest_timer > 0.5:
+				if selected_building < 0: # 诊断：查询直查 vs 输入路径
+					print("[uitest] 诊断: get_building_at(camp_pos)=%d selected=%d panning=%s mouse=%s camp=%s" % [
+						sim.get_building_at(camp_pos), selected.size(), panning,
+						get_global_mouse_position(), camp_pos,
+					])
+				_uitest_check(selected_building >= 0, "左键点选建筑")
+				uitest_step = 3
+				uitest_timer = 0.0
+				_enter_place_mode(1) # 伐木场
+				set_meta("uitest_b_before", sim.get_buildings().size())
+				_uitest_click(camp_pos + Vector2(TILE * 6, -TILE * 3), MOUSE_BUTTON_LEFT)
+		3: # 验证放置成功；再把房屋直接盖在工人堆上（排出测试）
+			if uitest_timer > 0.5:
+				var before: int = get_meta("uitest_b_before")
+				_uitest_check(sim.get_buildings().size() > before, "放置模式左键放置伐木场")
+				uitest_step = 4
+				uitest_timer = 0.0
+				var centroid := Vector2.ZERO
+				var ids := PackedInt32Array(range(START_WORKERS))
+				for p in sim.get_unit_positions(ids):
+					centroid += p
+				centroid /= START_WORKERS
+				_enter_place_mode(4) # 房屋
+				_uitest_click(centroid, MOUSE_BUTTON_LEFT)
+		4: # 验证无单位被困在新建筑占地内；发起行军并记录起点
+			if uitest_timer > 0.5:
+				var flat := sim.get_buildings()
+				var last := flat.size() / 2 - 1
+				var bc := flat[last * 2 + 1]
+				var bx := bc % MAP_DIM
+				var by := bc / MAP_DIM
+				var trapped := 0
+				var ids := PackedInt32Array(range(START_WORKERS))
+				for p in sim.get_unit_positions(ids):
+					var ucx := int(p.x / TILE)
+					var ucy := int(p.y / TILE)
+					if ucx >= bx and ucx < bx + 2 and ucy >= by and ucy < by + 2:
+						trapped += 1
+				_uitest_check(trapped == 0, "建筑压住的单位被排出占地")
+				set_meta("uitest_starts", sim.get_unit_positions(ids))
+				set_selection(ids)
+				sim.command_move(selected, camp_pos + Vector2(TILE * 14, 0))
+				camera.position = camp_pos + Vector2(TILE * 7, 0)
+				uitest_step = 5
+				uitest_timer = 0.0
+		5, 6, 7: # 行军中 3 次截图 + 渲染计数
+			if uitest_timer > 1.2:
+				uitest_timer = 0.0
+				var n := uitest_step - 4
+				get_viewport().get_texture().get_image().save_png("/tmp/uitest_march%d.png" % n)
+				print("[uitest] march shot %d: alive=%d" % [n, sim.count_alive(0)])
+				uitest_step += 1
+		8: # 行军位移断言：≥8 个工人离开出发点 100px 以上
+			var starts: PackedVector2Array = get_meta("uitest_starts")
+			var ids := PackedInt32Array(range(START_WORKERS))
+			var now_pts := sim.get_unit_positions(ids)
+			var moved := 0
+			for k in START_WORKERS:
+				if starts[k].distance_to(now_pts[k]) > 100.0:
+					moved += 1
+			_uitest_check(moved >= 8, "行军位移（%d/10 移动>100px）" % moved)
+			print("[uitest] done, failures: %d" % uitest_fail)
+			get_tree().quit(0 if uitest_fail == 0 else 1)
+
+
 # 操控方案：左键拖动 = 平移地图，左键短击 = 点选/开关门；
-# 右键拖动 = 框选，右键短击 = 命令（集火/登墙/修理/采集/移动）
+# 右键拖动 = 框选，右键短击 = 命令（集火/登墙/修理/采集/移动）。
+# 坐标一律取自事件本身（而非真实光标）：对合成事件/触摸/回放健壮。
 func _unhandled_input(event: InputEvent) -> void:
+	var ev_world := Vector2.ZERO
+	if event is InputEventMouse:
+		ev_world = get_viewport().get_canvas_transform().affine_inverse() * event.position
 	if event is InputEventMouseMotion:
 		if place_mode in WALL_TYPES and event.button_mask & MOUSE_BUTTON_MASK_LEFT:
 			# 墙体拖动连放（按住左键划线）
-			var cell := Vector2i(get_global_mouse_position() / TILE)
+			var cell := Vector2i(ev_world / TILE)
 			if sim.place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1)):
 				_add_building_visual(place_mode, cell)
 			return
@@ -772,7 +917,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					camera.zoom = (camera.zoom / 1.15).clamp(Vector2(0.03, 0.03), Vector2(4, 4))
 				MOUSE_BUTTON_LEFT:
 					if place_mode >= 0:
-						var cell := Vector2i(get_global_mouse_position() / TILE)
+						var cell := Vector2i(ev_world / TILE)
 						if sim.place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1)):
 							_add_building_visual(place_mode, cell)
 							# Shift 连放；墙体默认连放（拖动划线），右键/Esc 退出
@@ -781,13 +926,13 @@ func _unhandled_input(event: InputEvent) -> void:
 					else:
 						panning = true
 						pan_dist = 0.0
-						left_anchor = get_global_mouse_position()
+						left_anchor = ev_world
 				MOUSE_BUTTON_RIGHT:
 					if place_mode >= 0:
 						_exit_place_mode()
 					else:
 						box_selecting = true
-						drag_anchor = get_global_mouse_position()
+						drag_anchor = ev_world
 		else:
 			match event.button_index:
 				MOUSE_BUTTON_LEFT:
@@ -796,18 +941,26 @@ func _unhandled_input(event: InputEvent) -> void:
 						if pan_dist < 8.0: # 短击 = 点选：单位优先，其次建筑，否则清空
 							var rect := Rect2(left_anchor - Vector2(12, 12), Vector2(24, 24))
 							var ids := sim.get_units_in_rect(rect.position, rect.end)
+							if uitest_active:
+								print("[uitest] 点选调试: anchor=%s ids=%d building=%d" % [
+									left_anchor, ids.size(), sim.get_building_at(left_anchor)])
 							if ids.size() > 0:
 								set_selection(ids)
 							else:
-								set_selected_building(sim.get_building_at(left_anchor))
+								var b: int = sim.get_building_at(left_anchor)
+								if b >= 0:
+									set_selected_building(b)
+								else: # 点空地 = 全部取消（RW/标准 RTS 语义）
+									set_selection(PackedInt32Array())
+									set_selected_building(-1)
 				MOUSE_BUTTON_RIGHT:
 					if box_selecting:
 						box_selecting = false
-						var rect := _drag_rect()
+						var rect := _drag_rect(ev_world)
 						if rect.size.length() >= 8.0: # 拖动 = 框选
 							set_selection(sim.get_units_in_rect(rect.position, rect.end))
 							return
-						var pos := get_global_mouse_position()
+						var pos := ev_world
 						if selected_building >= 0: # 选中出兵建筑 → 右键设集结点
 							var flat := sim.get_buildings()
 							if flat[selected_building * 2] in [6, 7, 8, 13]:

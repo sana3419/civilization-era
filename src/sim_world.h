@@ -127,6 +127,7 @@ class SimWorld : public godot::RefCounted {
     // [attacker, target, ...]，attacker/target < 0 表示建筑 -(index+1)
     godot::PackedInt32Array attack_events;
     godot::PackedInt32Array building_events; // 本帧被摧毁的建筑 index（瞬态）
+    godot::PackedInt32Array death_events; // 本帧阵亡 [type, faction, x, y, ...]（死亡反馈）
 
     // 建筑（序列化范围）：占地 footprint×footprint，锚点为左上格
     std::vector<uint8_t> b_type;
@@ -230,6 +231,7 @@ public:
     float get_unit_morale(int p_id) const;
     int64_t get_stockpile(int p_type) const;
     godot::PackedInt32Array take_attack_events(); // 取走并清空
+    godot::PackedInt32Array take_death_events();
 
     void tick(float p_dt);
     void write_render_buffer(float p_alpha); // p_alpha: 上 tick→本 tick 插值系数
