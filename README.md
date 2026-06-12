@@ -59,3 +59,15 @@ godot --path game
 - Ctrl+S 存档 / F9 读档（user://save1.civ）
 - 模拟 10Hz 固定步长 + 渲染插值；人形单位不随速度旋转，仅左右镜像
 - 调试截图模式：CIVERA_SHOT=1 环境变量（20× 加速，6 秒后存 /tmp/civera_game.png 退出）
+
+## Windows 测试包导出（云端/CI 均可）
+
+```sh
+apt-get install -y mingw-w64 && update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+scons platform=windows arch=x86_64 target=template_debug use_mingw=true -j$(nproc)
+# 导出模板（一次性）：解 Godot_v4.6-stable_export_templates.tpz 里的 windows_* 到
+#   ~/.local/share/godot/export_templates/4.6.stable/
+godot --headless --path game --export-debug "Windows Desktop"   # → build/win64/
+```
+
+注意：wine 9 跑不动 Godot 4.6 官方模板（原版同样段错误），运行验证需真 Windows。
