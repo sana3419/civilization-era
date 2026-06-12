@@ -86,9 +86,10 @@ func update(delta: float) -> void:
 	if text_accum >= 0.2: # 状态行每秒 5 次足够
 		text_accum = 0.0
 		var sim: SimWorld = main.sim
-		res_label.text = "木材 %d  石料 %d  食物 %d  人口 %d/%d" % [
+		var pop: int = sim.count_alive(0)
+		res_label.text = "木材 %d  石料 %d  食物 %d（≈-%d/分）  人口 %d/%d" % [
 			sim.get_stockpile(0), sim.get_stockpile(1), sim.get_stockpile(2),
-			sim.count_alive(0), pop_cap(),
+			pop, pop, pop_cap(),
 		]
 		info_label.text = _status_line()
 	minimap.queue_redraw()
@@ -104,9 +105,10 @@ func _status_line() -> String:
 	if selected.size() == 1 and sim.is_unit_alive(selected[0]):
 		var id := selected[0]
 		var t: int = sim.get_unit_type(id)
-		parts.append("%s HP %d/%d  士气 %d  %s" % [
+		parts.append("%s HP %d/%d  士气 %d  饱食 %d  %s" % [
 			UNIT_NAMES[t], int(sim.get_unit_hp(id)), int(SimWorld.unit_max_hp(t)),
-			int(sim.get_unit_morale(id)), STATE_NAMES[sim.get_unit_state(id)],
+			int(sim.get_unit_morale(id)), int(sim.get_unit_satiety(id)),
+			STATE_NAMES[sim.get_unit_state(id)],
 		])
 	elif selected.size() > 1:
 		var counts := {}

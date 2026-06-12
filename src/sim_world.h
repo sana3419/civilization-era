@@ -122,6 +122,7 @@ class SimWorld : public godot::RefCounted {
     std::vector<float> home_x, home_y; // 出生点（溃逃目的地）
     std::vector<uint8_t> formation; // F_*
     std::vector<float> move_streak; // 持续全速移动秒数（冲锋动量）
+    std::vector<float> satiety; // 饱食度 0-100（仅玩家方消耗；<30 效率降/士气基线降）
 
     // 本帧攻击事件（渲染特效用，瞬态不序列化）：
     // [attacker, target, ...]，attacker/target < 0 表示建筑 -(index+1)
@@ -225,6 +226,8 @@ public:
     int count_alive(int p_faction) const;
     int count_state(int p_state, int p_faction) const;
     float get_unit_morale(int p_id) const;
+    float get_unit_satiety(int p_id) const;
+    void debug_set_satiety(int p_id, float p_value); // 测试用
     int64_t get_stockpile(int p_type) const;
     godot::PackedInt32Array take_attack_events(); // 取走并清空
 

@@ -30,6 +30,7 @@ func _init() -> void:
 	_bench_collision()
 	_bench_fixes()
 	_bench_resume_in_battle()
+	_bench_satiety()
 	_bench_golden()
 
 	print("=== done, failures: %d ===" % failures)
@@ -824,6 +825,49 @@ func _find_forest_near(m: GameMap, pc: Vector2i) -> Vector2i:
 				if m.get_terrain(pc.x + ox, pc.y + oy) == 4:
 					return pc + Vector2i(ox, oy)
 	return pc
+
+
+# 饱食度：断粮减速采集、压士气基线；有粮自动进食
+func _bench_satiety() -> void:
+	# 饿汉 vs 饱汉：各自单独世界采木 400 tick，饿汉产出应明显少（系数 0.5）
+	var wood := [0, 0]
+	for hungry in [true, false]:
+		var mw := _new_world()
+		var w: SimWorld = mw[1]
+		var pc := Vector2i(_find_battlefield(mw[0]) / 32.0)
+		var f := _find_forest_near(mw[0], pc)
+		w.set_dropoff(Vector2(pc) * 32.0 + Vector2(16, 16))
+		var id := w.spawn_workers(1, Vector2(pc) * 32.0 + Vector2(16, 16))
+		if hungry:
+			w.debug_set_satiety(id, 10.0) # 无存粮，吃不上
+		w.command_gather(PackedInt32Array([id]), Vector2(f) * 32.0 + Vector2(16, 16))
+		for i in 400:
+			w.tick(0.1)
+		wood[0 if hungry else 1] = w.get_stockpile(0)
+	# 进食：低饱食 + 有存粮 → 立即吃回，库存下降
+	var mw2 := _new_world()
+	var w2: SimWorld = mw2[1]
+	var pc2 := Vector2i(_find_battlefield(mw2[0]) / 32.0)
+	var e := w2.spawn_workers(1, Vector2(pc2) * 32.0 + Vector2(16, 16))
+	w2.debug_add_resources(0, 0, 100)
+	w2.debug_set_satiety(e, 20.0)
+	for i in 5:
+		w2.tick(0.1)
+	# 饥饿压士气基线：断粮民兵士气应滑向 40
+	var mw3 := _new_world()
+	var w3: SimWorld = mw3[1]
+	var pc3 := Vector2i(_find_battlefield(mw3[0]) / 32.0)
+	var m := w3.spawn_units(1, 1, Vector2(pc3) * 32.0 + Vector2(16, 16), 0)
+	w3.debug_set_satiety(m, 10.0)
+	for i in 300:
+		w3.tick(0.1)
+	print("satiety: 饿/饱采集 %d/%d %s | 进食后 %d(粮%d) %s | 饥饿士气 %.0f %s" % [
+		wood[0], wood[1], _check(wood[0] < wood[1] and wood[0] > 0, "hungry slower"),
+		int(w2.get_unit_satiety(e)), w2.get_stockpile(2),
+		_check(w2.get_unit_satiety(e) > 50.0 and w2.get_stockpile(2) < 100, "auto eat"),
+		w3.get_unit_morale(m),
+		_check(w3.get_unit_morale(m) < 50.0 and w3.get_unit_morale(m) > 30.0, "hunger morale"),
+	])
 
 
 func _bench_golden() -> void:

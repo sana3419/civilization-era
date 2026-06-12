@@ -96,6 +96,14 @@ int SimWorld::building_footprint(int p_type) {
     return (is_wall(uint8_t(p_type)) || is_gate(uint8_t(p_type))) ? 1 : 2;
 }
 
+// 饱食度 → 效率系数（设计文档：>70 = 1.0，30-70 = 0.8，<30 = 0.5）
+static inline float satiety_coef(float p_s) {
+    if (p_s > 70.0f) {
+        return 1.0f;
+    }
+    return (p_s >= 30.0f) ? 0.8f : 0.5f;
+}
+
 // 士气 → 战斗力修正（设计文档士气等级表）
 static inline float morale_mult(float p_m) {
     if (p_m >= 90.0f) {
@@ -171,6 +179,7 @@ void SimWorld::resize_arrays(int p_count) {
     home_y.resize(p_count, 0.0f);
     formation.resize(p_count, F_NONE);
     move_streak.resize(p_count, 0.0f);
+    satiety.resize(p_count, 100.0f);
 
     new_x.resize(p_count);
     new_y.resize(p_count);
@@ -343,6 +352,7 @@ int SimWorld::spawn_units(int p_type, int p_count, Vector2 p_world_pos, int p_fa
         home_y[i] = p_world_pos.y;
         formation[i] = F_NONE;
         move_streak[i] = 0.0f;
+        satiety[i] = 100.0f;
         prev_x[i] = pos_x[i];
         prev_y[i] = pos_y[i];
     }
@@ -439,6 +449,16 @@ void SimWorld::despawn_unit(int p_id) {
     release_garrison(p_id);
     alive[p_id] = 0; // 静默移除：无士气涟漪，槽位等待复用
     hp[p_id] = 0.0f;
+}
+
+float SimWorld::get_unit_satiety(int p_id) const {
+    return (p_id >= 0 && p_id < unit_count) ? satiety[p_id] : 0.0f;
+}
+
+void SimWorld::debug_set_satiety(int p_id, float p_value) {
+    if (p_id >= 0 && p_id < unit_count) {
+        satiety[p_id] = std::clamp(p_value, 0.0f, 100.0f);
+    }
 }
 
 int SimWorld::get_unit_faction(int p_id) const {
@@ -889,11 +909,21 @@ void SimWorld::logic_pass(float p_dt) {
             continue;
         }
         const UnitStats &st = STATS[u_type[i]];
-        // 士气：向基线 60 缓慢回归；崩溃检查
-        if (morale[i] < 60.0f) {
-            morale[i] = std::min(60.0f, morale[i] + 1.5f * p_dt);
-        } else if (morale[i] > 60.0f) {
-            morale[i] = std::max(60.0f, morale[i] - 0.5f * p_dt);
+        // 食物消耗（仅玩家方）：100 饱食 ≈ 10 分钟；≤50 且有存粮就吃
+        // （5 食物 = +50，折合 ≈1 食物/分/人）。串行按序进食 → 缺粮时低位号优先，确定性
+        if (faction[i] == 0) {
+            satiety[i] = std::max(0.0f, satiety[i] - (10.0f / 60.0f) * p_dt);
+            if (satiety[i] <= 50.0f && stockpile[RES_FOOD] >= 5) {
+                stockpile[RES_FOOD] -= 5;
+                satiety[i] = std::min(100.0f, satiety[i] + 50.0f);
+            }
+        }
+        // 士气：向基线缓慢回归（饥饿把基线压到 40：饿着肚子打不了硬仗）；崩溃检查
+        const float base = (faction[i] == 0 && satiety[i] < 30.0f) ? 40.0f : 60.0f;
+        if (morale[i] < base) {
+            morale[i] = std::min(base, morale[i] + 1.5f * p_dt);
+        } else if (morale[i] > base) {
+            morale[i] = std::max(base, morale[i] - 0.5f * p_dt);
         }
         if (morale[i] < 20.0f && state[i] != U_FLEE && st.aggro_range > 0.0f) {
             release_garrison(i); // 墙上也会吓跑
@@ -1035,7 +1065,7 @@ void SimWorld::logic_pass(float p_dt) {
                 }
                 const int32_t cell = cell_of_pos(pos_x[i], pos_y[i]);
                 if (cell_adjacent(cell, target_cell[i]) || cell == target_cell[i]) {
-                    timer[i] += p_dt;
+                    timer[i] += p_dt * satiety_coef(satiety[i]); // 饿着干活慢
                     if (timer[i] >= GATHER_TIME) {
                         timer[i] = 0.0f;
                         const uint8_t t_before = map->terrain_at(
@@ -1272,7 +1302,8 @@ void SimWorld::logic_pass(float p_dt) {
                 if (dx * dx + dy * dy <= reach * reach) { // 贴近：修理
                     slot_x[i] = pos_x[i];
                     slot_y[i] = pos_y[i];
-                    b_hp[b] = std::min(building_max_hp(b_type[b]), b_hp[b] + 12.0f * p_dt);
+                    b_hp[b] = std::min(building_max_hp(b_type[b]),
+                            b_hp[b] + 12.0f * p_dt * satiety_coef(satiety[i]));
                     break;
                 }
                 slot_x[i] = bx; // 走过去（同攻城寻路：远走流场近直线）
@@ -1909,7 +1940,7 @@ PackedInt32Array SimWorld::get_buildings() const {
 // 存档格式（版本见 SAVE_VERSION）：头部 + 单位 SoA + 建筑数组，定宽小端。
 // 数据布局变更必须升版本号；golden 基线随逻辑变更重置（删 golden_hash.txt 重新初始化）。
 static constexpr uint32_t SAVE_MAGIC = 0x57564943; // "CIVW" LE
-static constexpr uint32_t SAVE_VERSION = 8; // v8: + 建筑 b_state（门开关/摧毁语义靠 hp）
+static constexpr uint32_t SAVE_VERSION = 9; // v9: + 单位 satiety（饱食度）
 
 template <typename T>
 static void blob_write(PackedByteArray &r_out, const T *p_data, size_t p_count) {
@@ -1964,6 +1995,7 @@ PackedByteArray SimWorld::save_state() const {
     blob_write(out, home_y.data(), home_y.size());
     blob_write(out, formation.data(), formation.size());
     blob_write(out, move_streak.data(), move_streak.size());
+    blob_write(out, satiety.data(), satiety.size());
     const int32_t n_buildings = int32_t(b_cell.size());
     blob_write(out, &n_buildings, 1);
     blob_write(out, b_type.data(), b_type.size());
@@ -1994,7 +2026,7 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
     // 整体长度前置校验：通过后所有 blob_read 必然成功，避免 setup() 重置后
     // 半途失败留下"既非原世界也非存档"的脏状态（截断/坏档的现实情形全在这挡住）。
     // 字节数与 save_state 字段一一对应（SAVE_VERSION v8），改格式时同步。
-    constexpr size_t UNIT_BYTES = 14 * 4 + 4 + 3 * 4 + 7; // floats + rng + int32×3 + bytes×7
+    constexpr size_t UNIT_BYTES = 15 * 4 + 4 + 3 * 4 + 7; // floats(+satiety) + rng + int32×3 + bytes×7
     constexpr size_t BUILDING_BYTES = 1 + 4 + 4 + 4 + 1; // type/cell/hp/timer/state
     const size_t nb_at = at + 4 + RES_COUNT * 8 + size_t(count) * UNIT_BYTES;
     if (p_data.size() < nb_at + 4) {
@@ -2034,7 +2066,8 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
             !blob_read(p_data, at, home_x.data(), home_x.size()) ||
             !blob_read(p_data, at, home_y.data(), home_y.size()) ||
             !blob_read(p_data, at, formation.data(), formation.size()) ||
-            !blob_read(p_data, at, move_streak.data(), move_streak.size())) {
+            !blob_read(p_data, at, move_streak.data(), move_streak.size()) ||
+            !blob_read(p_data, at, satiety.data(), satiety.size())) {
         return false;
     }
     int32_t n_buildings = 0;
@@ -2107,6 +2140,7 @@ int64_t SimWorld::state_hash() const {
     mix_bytes(hp.data(), hp.size() * 4);
     mix_bytes(alive.data(), alive.size());
     mix_bytes(morale.data(), morale.size() * 4);
+    mix_bytes(satiety.data(), satiety.size() * 4);
     mix_bytes(formation.data(), formation.size());
     mix_bytes(b_hp.data(), b_hp.size() * 4);
     mix_bytes(b_type.data(), b_type.size());
@@ -2141,6 +2175,8 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("command_repair", "ids", "world_pos"), &SimWorld::command_repair);
     ClassDB::bind_method(D_METHOD("despawn_unit", "id"), &SimWorld::despawn_unit);
     ClassDB::bind_method(D_METHOD("get_unit_faction", "id"), &SimWorld::get_unit_faction);
+    ClassDB::bind_method(D_METHOD("get_unit_satiety", "id"), &SimWorld::get_unit_satiety);
+    ClassDB::bind_method(D_METHOD("debug_set_satiety", "id", "value"), &SimWorld::debug_set_satiety);
     ClassDB::bind_static_method("SimWorld", D_METHOD("unit_max_hp", "type"), &SimWorld::unit_max_hp);
     ClassDB::bind_static_method("SimWorld", D_METHOD("building_max_hp", "type"), &SimWorld::building_max_hp_of);
     ClassDB::bind_method(D_METHOD("toggle_gate_at", "world_pos"), &SimWorld::toggle_gate_at);
