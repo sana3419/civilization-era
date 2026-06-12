@@ -6,7 +6,7 @@ extends CanvasLayer
 const UNIT_NAMES := ["工人", "民兵", "土匪", "弓手", "骑兵", "长枪兵", "攻城槌", "投石车"]
 const STATE_NAMES := ["游荡", "待命", "行军", "采集", "运回", "作战", "溃逃", "驻墙", "修理"]
 const TERRAIN_NAMES := ["深水", "浅水", "平原", "草地", "森林", "密林", "丘陵", "高山", "沙漠", "沼泽", "雪原"]
-const RES_NAMES := ["木材", "石料", "食物"]
+const RES_NAMES := ["木材", "石料", "食物", "木板"]
 const POP_BASE := 10 # 人口上限：基础 + 每座房屋 +5（同步 DESIGN.md）
 const POP_PER_HOUSE := 5
 
@@ -55,7 +55,13 @@ func _ready() -> void:
 		hbox.add_child(btn)
 	for t in main.TRAIN:
 		var train := Button.new()
-		train.text = "训练%s\n%d木 %d食" % [t["name"], t["wood"], t["food"]]
+		var cost := "%d木" % t["wood"]
+		if t.get("stone", 0) > 0:
+			cost += " %d石" % t["stone"]
+		if t.get("plank", 0) > 0:
+			cost += " %d板" % t["plank"]
+		cost += " %d食" % t["food"]
+		train.text = "训练%s\n%s" % [t["name"], cost]
 		train.add_theme_font_size_override("font_size", 14)
 		train.pressed.connect(main._train_unit.bind(t))
 		hbox.add_child(train)
@@ -87,9 +93,9 @@ func update(delta: float) -> void:
 		text_accum = 0.0
 		var sim: SimWorld = main.sim
 		var pop: int = sim.count_alive(0)
-		res_label.text = "木材 %d  石料 %d  食物 %d（≈-%d/分）  人口 %d/%d" % [
+		res_label.text = "木材 %d  石料 %d  食物 %d（≈-%d/分）  木板 %d  人口 %d/%d" % [
 			sim.get_stockpile(0), sim.get_stockpile(1), sim.get_stockpile(2),
-			pop, pop, pop_cap(),
+			pop, sim.get_stockpile(3), pop, pop_cap(),
 		]
 		info_label.text = _status_line()
 	minimap.queue_redraw()

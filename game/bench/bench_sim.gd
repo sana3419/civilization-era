@@ -31,6 +31,7 @@ func _init() -> void:
 	_bench_fixes()
 	_bench_resume_in_battle()
 	_bench_satiety()
+	_bench_sawmill()
 	_bench_golden()
 
 	print("=== done, failures: %d ===" % failures)
@@ -867,6 +868,26 @@ func _bench_satiety() -> void:
 		_check(w2.get_unit_satiety(e) > 50.0 and w2.get_stockpile(2) < 100, "auto eat"),
 		w3.get_unit_morale(m),
 		_check(w3.get_unit_morale(m) < 50.0 and w3.get_unit_morale(m) > 30.0, "hunger morale"),
+	])
+
+
+# 锯木厂：自动 5 木 → 3 木板 / 4s，缺料待机
+func _bench_sawmill() -> void:
+	var mw := _new_world()
+	var w: SimWorld = mw[1]
+	var pc := Vector2i(_find_battlefield(mw[0]) / 32.0)
+	w.debug_add_resources(100, 50, 0)
+	w.place_building(15, Vector2(pc) * 32.0 + Vector2(1, 1)) # 锯木厂 30木10石 → 余 70 木
+	for i in 200: # 20s → 5 轮转化：70-25=45 木，15 板
+		w.tick(0.1)
+	var ok_conv := w.get_stockpile(0) == 45 and w.get_stockpile(3) == 15
+	for i in 400: # 再 40s：木 45→可再 9 轮=45 木耗尽，板 +27=42
+		w.tick(0.1)
+	print("sawmill: 20s 后 木%d 板%d %s | 耗尽后 木%d 板%d %s" % [
+		45 if ok_conv else w.get_stockpile(0), 15 if ok_conv else w.get_stockpile(3),
+		_check(ok_conv, "sawmill convert"),
+		w.get_stockpile(0), w.get_stockpile(3),
+		_check(w.get_stockpile(0) < 5 and w.get_stockpile(3) == 42, "sawmill idle on empty"),
 	])
 
 

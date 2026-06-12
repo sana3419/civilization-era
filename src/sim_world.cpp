@@ -359,10 +359,11 @@ int SimWorld::spawn_units(int p_type, int p_count, Vector2 p_world_pos, int p_fa
     return first;
 }
 
-void SimWorld::debug_add_resources(int p_wood, int p_stone, int p_food) {
+void SimWorld::debug_add_resources(int p_wood, int p_stone, int p_food, int p_plank) {
     stockpile[RES_WOOD] += p_wood;
     stockpile[RES_STONE] += p_stone;
     stockpile[RES_FOOD] += p_food;
+    stockpile[RES_PLANK] += p_plank;
 }
 
 void SimWorld::command_attack(const PackedInt32Array &p_ids, int p_target_id) {
@@ -644,14 +645,15 @@ void SimWorld::release_garrison(int p_unit) {
     target_cell[p_unit] = -1;
 }
 
-bool SimWorld::try_spend(int p_wood, int p_stone, int p_food) {
+bool SimWorld::try_spend(int p_wood, int p_stone, int p_food, int p_plank) {
     if (stockpile[RES_WOOD] < p_wood || stockpile[RES_STONE] < p_stone ||
-            stockpile[RES_FOOD] < p_food) {
+            stockpile[RES_FOOD] < p_food || stockpile[RES_PLANK] < p_plank) {
         return false;
     }
     stockpile[RES_WOOD] -= p_wood;
     stockpile[RES_STONE] -= p_stone;
     stockpile[RES_FOOD] -= p_food;
+    stockpile[RES_PLANK] -= p_plank;
     return true;
 }
 
@@ -1360,6 +1362,24 @@ void SimWorld::logic_pass(float p_dt) {
         }
     }
 
+    // 锯木厂产线：自动 5 木材 → 3 木板 / 4s（串行按建筑序，确定性）
+    for (size_t b = 0; b < b_cell.size(); b++) {
+        if (b_type[b] != B_SAWMILL || b_hp[b] <= 0.0f) {
+            continue;
+        }
+        b_timer[b] -= p_dt;
+        if (b_timer[b] > 0.0f) {
+            continue;
+        }
+        if (stockpile[RES_WOOD] >= 5) {
+            stockpile[RES_WOOD] -= 5;
+            stockpile[RES_PLANK] += 3;
+            b_timer[b] = 4.0f;
+        } else {
+            b_timer[b] = 0.0f; // 缺料待机
+        }
+    }
+
     // 箭塔自动攻击（玩家建筑，打 faction != 0）
     for (size_t b = 0; b < b_cell.size(); b++) {
         if (b_type[b] != B_TOWER || b_hp[b] <= 0.0f) {
@@ -1766,6 +1786,8 @@ Vector2i SimWorld::building_cost(int p_type) { // (木材, 石料)
             return Vector2i(15, 0);
         case B_SWORKSHOP:
             return Vector2i(40, 20);
+        case B_SAWMILL:
+            return Vector2i(30, 10);
         case B_STONE_WALL:
             return Vector2i(0, 10);
         case B_STONE_GATE:
@@ -1940,7 +1962,7 @@ PackedInt32Array SimWorld::get_buildings() const {
 // 存档格式（版本见 SAVE_VERSION）：头部 + 单位 SoA + 建筑数组，定宽小端。
 // 数据布局变更必须升版本号；golden 基线随逻辑变更重置（删 golden_hash.txt 重新初始化）。
 static constexpr uint32_t SAVE_MAGIC = 0x57564943; // "CIVW" LE
-static constexpr uint32_t SAVE_VERSION = 9; // v9: + 单位 satiety（饱食度）
+static constexpr uint32_t SAVE_VERSION = 10; // v10: 库存扩到 4 资源（+木板）
 
 template <typename T>
 static void blob_write(PackedByteArray &r_out, const T *p_data, size_t p_count) {
@@ -2156,7 +2178,7 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("set_dropoff", "world_pos"), &SimWorld::set_dropoff);
     ClassDB::bind_method(D_METHOD("spawn_workers", "count", "world_pos"), &SimWorld::spawn_workers);
     ClassDB::bind_method(D_METHOD("spawn_units", "type", "count", "world_pos", "faction"), &SimWorld::spawn_units);
-    ClassDB::bind_method(D_METHOD("try_spend", "wood", "stone", "food"), &SimWorld::try_spend);
+    ClassDB::bind_method(D_METHOD("try_spend", "wood", "stone", "food", "plank"), &SimWorld::try_spend, DEFVAL(0));
     ClassDB::bind_method(D_METHOD("get_unit_type", "id"), &SimWorld::get_unit_type);
     ClassDB::bind_method(D_METHOD("get_unit_hp", "id"), &SimWorld::get_unit_hp);
     ClassDB::bind_method(D_METHOD("is_unit_alive", "id"), &SimWorld::is_unit_alive);
@@ -2167,7 +2189,7 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("count_state", "state", "faction"), &SimWorld::count_state);
     ClassDB::bind_method(D_METHOD("command_set_formation", "ids", "formation"), &SimWorld::command_set_formation);
     ClassDB::bind_method(D_METHOD("get_unit_formation", "id"), &SimWorld::get_unit_formation);
-    ClassDB::bind_method(D_METHOD("debug_add_resources", "wood", "stone", "food"), &SimWorld::debug_add_resources);
+    ClassDB::bind_method(D_METHOD("debug_add_resources", "wood", "stone", "food", "plank"), &SimWorld::debug_add_resources, DEFVAL(0));
     ClassDB::bind_method(D_METHOD("get_building_hp", "index"), &SimWorld::get_building_hp);
     ClassDB::bind_method(D_METHOD("get_building_state", "index"), &SimWorld::get_building_state);
     ClassDB::bind_method(D_METHOD("command_attack_building", "ids", "building"), &SimWorld::command_attack_building);

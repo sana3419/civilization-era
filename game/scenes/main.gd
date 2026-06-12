@@ -32,6 +32,7 @@ const BUILDINGS := [
 	{ "name": "攻城工坊", "color": Color("5a4a3a") },
 	{ "name": "石墙", "color": Color("8a8a96") },
 	{ "name": "石门", "color": Color("aaa9b8") },
+	{ "name": "锯木厂", "color": Color("b08850") },
 ]
 const WALL_TYPES := [10, 13] # 可拖动划线连放的 1×1 墙体
 # 训练表：单位类型 → 所需建筑/成本（与 src/sim_world.h 对应）
@@ -41,8 +42,8 @@ const TRAIN := [
 	{ "type": 3, "name": "弓手", "building": 7, "wood": 15, "food": 15 },
 	{ "type": 4, "name": "骑兵", "building": 8, "wood": 30, "food": 30 },
 	{ "type": 5, "name": "长枪兵", "building": 6, "wood": 20, "food": 25 },
-	{ "type": 6, "name": "攻城槌", "building": 12, "wood": 60, "stone": 0, "food": 20 },
-	{ "type": 7, "name": "投石车", "building": 12, "wood": 80, "stone": 20, "food": 10 },
+	{ "type": 6, "name": "攻城槌", "building": 12, "wood": 40, "plank": 15, "food": 20 },
+	{ "type": 7, "name": "投石车", "building": 12, "wood": 50, "stone": 20, "plank": 20, "food": 10 },
 ]
 # 单位血量上限由 SimWorld.unit_max_hp(type) 提供（STATS 表单一来源）；
 # 文案/人口常量在 hud.gd（GameHud）
@@ -403,7 +404,7 @@ func _train_unit(t: Dictionary) -> void:
 	if best < 0:
 		hud.notice("需要先建%s" % BUILDINGS[t["building"]]["name"])
 		return
-	if not sim.try_spend(t["wood"], t.get("stone", 0), t["food"]):
+	if not sim.try_spend(t["wood"], t.get("stone", 0), t["food"], t.get("plank", 0)):
 		hud.notice("资源不足")
 		return
 	if not train_queues.has(best):

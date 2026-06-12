@@ -14,7 +14,8 @@ enum ResourceType : uint8_t {
     RES_WOOD = 0,
     RES_STONE = 1,
     RES_FOOD = 2,
-    RES_COUNT = 3,
+    RES_PLANK = 3, // 木板：锯木厂加工产物，不可直接采集
+    RES_COUNT = 4,
 };
 
 enum Terrain : uint8_t {
