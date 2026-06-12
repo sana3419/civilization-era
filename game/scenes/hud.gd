@@ -176,6 +176,13 @@ func _fill_building_panel(b: int) -> void:
 	bld_hp_label.add_theme_font_size_override("font_size", 14)
 	_refresh_building_hp(b, btype)
 	context_box.add_child(bld_hp_label)
+	if not main.sim.is_building_built(b):
+		var hint := Label.new()
+		hint.text = "🔨 建造中（工人右键工地可加快）"
+		hint.add_theme_font_size_override("font_size", 13)
+		hint.modulate = Color(1, 0.9, 0.5)
+		context_box.add_child(hint)
+		return # 工地：不显示训练/开门等功能按钮
 
 	var row := HBoxContainer.new()
 	for t in main.TRAIN: # 训练按钮只出现在对应军事建筑面板
@@ -215,7 +222,8 @@ func pop_cap() -> int:
 	var flat: PackedInt32Array = main.sim.get_buildings()
 	var cap := POP_BASE
 	for b in range(flat.size() / 2):
-		if flat[b * 2] == 4 and main.sim.get_building_hp(b) > 0.0: # 房屋
+		if flat[b * 2] == 4 and main.sim.get_building_hp(b) > 0.0 \
+				and main.sim.is_building_built(b): # 已建成的房屋
 			cap += POP_PER_HOUSE
 	return cap
 

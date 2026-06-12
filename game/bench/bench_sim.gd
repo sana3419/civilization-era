@@ -386,7 +386,7 @@ func _run_tower_sim() -> SimWorld:
 		if bc.x >= 0:
 			break
 	w.debug_add_resources(100, 100, 0)
-	assert(w.place_building(9, Vector2(bc) * 32.0 + Vector2(1, 1)))
+	assert(w.place_building(9, Vector2(bc) * 32.0 + Vector2(1, 1), true))
 	w.spawn_units(2, 3, Vector2(bc) * 32.0 + Vector2(150, 32), 1) # 塔射程内
 	for i in 400: # 40 秒
 		w.tick(0.1)
@@ -452,7 +452,7 @@ func _run_siege_sim() -> Dictionary:
 				continue
 			var c := pc + Vector2i(ox, oy)
 			var t := 11 if c == gate_cell else 10
-			if w.place_building(t, Vector2(c) * 32.0 + Vector2(1, 1)):
+			if w.place_building(t, Vector2(c) * 32.0 + Vector2(1, 1), true):
 				placed += 1
 	w.spawn_workers(4, Vector2(pc) * 32.0 + Vector2(16, 16))
 	w.toggle_gate_at(Vector2(gate_cell) * 32.0 + Vector2(16, 16)) # 关门
@@ -495,7 +495,7 @@ func _run_gate_pass_sim(open: bool) -> float:
 			if maxi(absi(ox), absi(oy)) != 3:
 				continue
 			var c := pc + Vector2i(ox, oy)
-			w.place_building(11 if c == gate_cell else 10, Vector2(c) * 32.0 + Vector2(1, 1))
+			w.place_building(11 if c == gate_cell else 10, Vector2(c) * 32.0 + Vector2(1, 1), true)
 	w.spawn_workers(1, Vector2(pc) * 32.0 + Vector2(16, 16))
 	if not open:
 		w.toggle_gate_at(Vector2(gate_cell) * 32.0 + Vector2(16, 16))
@@ -540,7 +540,7 @@ func _run_ram_sim() -> Dictionary:
 			if maxi(absi(ox), absi(oy)) != 3:
 				continue
 			var c := pc + Vector2i(ox, oy)
-			w.place_building(14 if c == gate_cell else 13, Vector2(c) * 32.0 + Vector2(1, 1))
+			w.place_building(14 if c == gate_cell else 13, Vector2(c) * 32.0 + Vector2(1, 1), true)
 	w.spawn_workers(4, Vector2(pc) * 32.0 + Vector2(16, 16))
 	w.toggle_gate_at(Vector2(gate_cell) * 32.0 + Vector2(16, 16)) # 关门
 	var first := w.spawn_units(2, 4, Vector2(pc) * 32.0 + Vector2(320, 16), 1)
@@ -571,7 +571,7 @@ func _run_garrison_sim() -> Dictionary:
 	var pc := Vector2i(_find_battlefield(map) / 32.0)
 	w.debug_add_resources(0, 100, 0)
 	for oy in range(-2, 3): # 南北向 5 段石墙
-		w.place_building(13, Vector2(pc + Vector2i(0, oy)) * 32.0 + Vector2(1, 1))
+		w.place_building(13, Vector2(pc + Vector2i(0, oy)) * 32.0 + Vector2(1, 1), true)
 	var archer := w.spawn_units(3, 1, Vector2(pc) * 32.0 + Vector2(-48, 16), 0)
 	var ok := w.command_garrison(PackedInt32Array([archer]),
 			Vector2(pc) * 32.0 + Vector2(16, 16))
@@ -599,7 +599,7 @@ func _run_catapult_sim() -> Dictionary:
 	w.set_map(map)
 	var pc := Vector2i(_find_battlefield(map) / 32.0)
 	w.debug_add_resources(50, 0, 0)
-	w.place_building(10, Vector2(pc + Vector2i(4, 0)) * 32.0 + Vector2(1, 1))
+	w.place_building(10, Vector2(pc + Vector2i(4, 0)) * 32.0 + Vector2(1, 1), true)
 	var cata := w.spawn_units(7, 1, Vector2(pc + Vector2i(-4, 0)) * 32.0 + Vector2(16, 16), 0)
 	var start: Vector2 = w.get_unit_positions(PackedInt32Array([cata]))[0]
 	w.command_attack_building(PackedInt32Array([cata]), 0)
@@ -676,7 +676,7 @@ func _bench_fixes() -> void:
 	for oy in range(-2, 3):
 		for ox in range(-2, 3):
 			if maxi(absi(ox), absi(oy)) == 2:
-				w.place_building(13, Vector2(pc + Vector2i(ox, oy)) * 32.0 + Vector2(1, 1))
+				w.place_building(13, Vector2(pc + Vector2i(ox, oy)) * 32.0 + Vector2(1, 1), true)
 	var archer := w.spawn_units(3, 1, Vector2(pc) * 32.0 + Vector2(16, 16), 0)
 	var bandit := w.spawn_units(2, 1, Vector2(pc) * 32.0 + Vector2(320, 16), 1)
 	w.command_attack(PackedInt32Array([bandit]), archer)
@@ -692,7 +692,7 @@ func _bench_fixes() -> void:
 	pc = Vector2i(_find_battlefield(mw[0]) / 32.0)
 	w.debug_add_resources(100, 100, 0)
 	var gate_pos := Vector2(pc + Vector2i(4, 0)) * 32.0 + Vector2(1, 1)
-	w.place_building(14, gate_pos)
+	w.place_building(14, gate_pos, true)
 	var cata := w.spawn_units(7, 1, Vector2(pc + Vector2i(-4, 0)) * 32.0 + Vector2(16, 16), 0)
 	var b2 := w.spawn_units(2, 2, Vector2(pc + Vector2i(5, 0)) * 32.0 + Vector2(16, 16), 1)
 	w.command_attack_building(PackedInt32Array([cata]), 0)
@@ -709,7 +709,7 @@ func _bench_fixes() -> void:
 	w = mw[1]
 	pc = Vector2i(_find_battlefield(mw[0]) / 32.0)
 	w.debug_add_resources(50, 0, 0)
-	w.place_building(10, Vector2(pc + Vector2i(2, 0)) * 32.0 + Vector2(1, 1))
+	w.place_building(10, Vector2(pc + Vector2i(2, 0)) * 32.0 + Vector2(1, 1), true)
 	w.debug_damage_building(0, 300.0) # 500 → 200
 	var worker := w.spawn_workers(1, Vector2(pc) * 32.0 + Vector2(16, 16))
 	w.command_repair(PackedInt32Array([worker]),

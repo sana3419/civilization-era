@@ -99,7 +99,7 @@ func _ready() -> void:
 
 	var camp_cell := _find_camp_cell()
 	camp_pos = Vector2(camp_cell) * TILE + Vector2(TILE, TILE)
-	sim.place_building(0, camp_pos) # 营地（免费初始建筑）
+	sim.place_building(0, camp_pos, true) # 营地（免费初始建筑，立即建成）
 	_add_building_visual(0, camp_cell)
 	sim.spawn_workers(START_WORKERS, camp_pos + Vector2(0, TILE * 2.5))
 	sim.spawn_units(1, 2, camp_pos + Vector2(TILE * 2, TILE * 2.5), 0) # 开局 2 民兵：首波前不至于零反制
@@ -333,7 +333,7 @@ func _px_cactus(img: Image, x: int, y: int, sway: int) -> void:
 	img.fill_rect(Rect2i(x + 6, y + 8 - sway, 2, 7 + sway), Color("3a7a3a"))
 
 
-func _add_building_visual(type: int, anchor_cell: Vector2i, open := true) -> void:
+func _add_building_visual(type: int, anchor_cell: Vector2i, open := true, built := true) -> void:
 	var bsize: int = SimWorld.building_size(type)
 	var is_gate := type == 11 or type == 14
 	var rect := ColorRect.new()
@@ -341,13 +341,18 @@ func _add_building_visual(type: int, anchor_cell: Vector2i, open := true) -> voi
 	rect.color = BUILDINGS[type]["color"]
 	if is_gate and not open: # 关闭的城门加深
 		rect.color = rect.color.darkened(0.45)
+	if not built: # 工地：半透明（工人施工至满血完工）
+		rect.modulate.a = 0.5
 	rect.size = Vector2(TILE, TILE) * bsize
 	rect.position = Vector2(anchor_cell) * TILE
 	building_layer.add_child(rect)
 	if type in WALL_TYPES: # 墙段不挂名牌（太密）
 		return
 	var tag := Label.new()
-	tag.text = BUILDINGS[type]["name"] if not is_gate else ("门·开" if open else "门·关")
+	if not built:
+		tag.text = "工地"
+	else:
+		tag.text = BUILDINGS[type]["name"] if not is_gate else ("门·开" if open else "门·关")
 	tag.add_theme_font_size_override("font_size", 12 if bsize == 2 else 8)
 	tag.position = Vector2(2, TILE * bsize - (18 if bsize == 2 else 12))
 	rect.add_child(tag)
@@ -362,7 +367,7 @@ func _rebuild_building_visuals() -> void:
 			continue
 		var cell := flat[b * 2 + 1]
 		_add_building_visual(flat[b * 2], Vector2i(cell % MAP_DIM, cell / MAP_DIM),
-				sim.get_building_state(b) == 1)
+				sim.get_building_state(b) == 1, sim.is_building_built(b))
 
 
 func _sync_unit_mesh() -> void:
@@ -496,6 +501,9 @@ func _train_unit_at(t: Dictionary, b: int) -> void:
 	var flat := sim.get_buildings()
 	if b < 0 or b >= flat.size() / 2 or sim.get_building_hp(b) <= 0.0:
 		return
+	if not sim.is_building_built(b):
+		hud.notice("建造中，尚不能训练")
+		return
 	if not sim.try_spend(t["wood"], t.get("stone", 0), t["food"]):
 		hud.notice("资源不足")
 		return
@@ -603,6 +611,16 @@ func _process(delta: float) -> void:
 	for fx in death_fx:
 		fx["ttl"] -= delta
 	death_fx = death_fx.filter(func(fx): return fx["ttl"] > 0.0)
+
+	# 完工事件：通知 + 刷新可视化（半透明工地 → 实体）
+	var done_b := sim.take_construction_events()
+	if done_b.size() > 0:
+		var flat_done := sim.get_buildings()
+		for b in done_b:
+			hud.notice("✓ %s 建成" % BUILDINGS[flat_done[b * 2]]["name"], 2.5)
+		_rebuild_building_visuals()
+		if selected_building >= 0:
+			hud.refresh_context() # 面板上的训练按钮等随完工解锁
 	var bev := sim.take_building_events()
 	if bev.size() > 0: # 有建筑被摧毁，重画
 		_rebuild_building_visuals()
@@ -833,13 +851,31 @@ func _uitest_tick(delta: float) -> void:
 				_uitest_check(selected_building >= 0, "左键点选建筑")
 				uitest_step = 3
 				uitest_timer = 0.0
+				set_selection(PackedInt32Array(range(4))) # 真实流程：选工人 → 建造菜单 → 放置
 				_enter_place_mode(1) # 伐木场
 				set_meta("uitest_b_before", sim.get_buildings().size())
 				_uitest_click(camp_pos + Vector2(TILE * 6, -TILE * 3), MOUSE_BUTTON_LEFT)
-		3: # 验证放置成功；再把房屋直接盖在工人堆上（排出测试）
+		3: # 验证放置成功（应为工地）；等工人施工完工
 			if uitest_timer > 0.5:
 				var before: int = get_meta("uitest_b_before")
-				_uitest_check(sim.get_buildings().size() > before, "放置模式左键放置伐木场")
+				var placed := sim.get_buildings().size() > before
+				_uitest_check(placed, "放置模式左键放置伐木场")
+				if placed:
+					_uitest_check(not sim.is_building_built(sim.get_buildings().size() / 2 - 1),
+							"新建筑为工地（未完工）")
+				uitest_step = 31
+				uitest_timer = 0.0
+		31: # 4 工人施工 12s/4≈3s + 走位；10s 内必须完工
+			if sim.is_building_built(sim.get_buildings().size() / 2 - 1):
+				_uitest_check(true, "工人施工完工（%.1fs）" % uitest_timer)
+				uitest_step = 32
+				uitest_timer = 0.0
+			elif uitest_timer > 10.0:
+				_uitest_check(false, "工人施工完工（超时）")
+				uitest_step = 32
+				uitest_timer = 0.0
+		32: # 转排出测试
+			if uitest_timer > 0.2:
 				uitest_step = 4
 				uitest_timer = 0.0
 				var centroid := Vector2.ZERO
@@ -847,8 +883,11 @@ func _uitest_tick(delta: float) -> void:
 				for p in sim.get_unit_positions(ids):
 					centroid += p
 				centroid /= START_WORKERS
+				set_selection(ids)
 				_enter_place_mode(4) # 房屋
 				_uitest_click(centroid, MOUSE_BUTTON_LEFT)
+				uitest_step = 4
+				uitest_timer = 0.0
 		4: # 验证无单位被困在新建筑占地内；发起行军并记录起点
 			if uitest_timer > 0.5:
 				var flat := sim.get_buildings()
@@ -902,7 +941,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			# 墙体拖动连放（按住左键划线）
 			var cell := Vector2i(ev_world / TILE)
 			if sim.place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1)):
-				_add_building_visual(place_mode, cell)
+				_add_building_visual(place_mode, cell, true, false)
+				sim.command_repair(selected, Vector2(cell) * TILE + Vector2(1, 1))
 			return
 		if panning:
 			camera.position -= event.relative / camera.zoom.x
@@ -919,7 +959,9 @@ func _unhandled_input(event: InputEvent) -> void:
 					if place_mode >= 0:
 						var cell := Vector2i(ev_world / TILE)
 						if sim.place_building(place_mode, Vector2(cell) * TILE + Vector2(1, 1)):
-							_add_building_visual(place_mode, cell)
+							_add_building_visual(place_mode, cell, true, false)
+							# 派选中工人去施工（修理通路承载建造）
+							sim.command_repair(selected, Vector2(cell) * TILE + Vector2(1, 1))
 							# Shift 连放；墙体默认连放（拖动划线），右键/Esc 退出
 							if not Input.is_key_pressed(KEY_SHIFT) and place_mode not in WALL_TYPES:
 								_exit_place_mode()

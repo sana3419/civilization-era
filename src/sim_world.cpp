@@ -203,6 +203,7 @@ void SimWorld::setup(int p_count, float p_world_size, int p_seed, int p_threads)
     b_timer.clear();
     b_state.clear();
     b_garrison.clear();
+    b_built.clear();
     field_cache.clear();
     field_cache_dirty = false;
 
@@ -454,7 +455,7 @@ bool SimWorld::command_garrison(const PackedInt32Array &p_ids, Vector2 p_world_p
     const int32_t cell = cell_of_pos(p_world_pos.x, p_world_pos.y);
     int wall = -1;
     for (size_t b = 0; b < b_cell.size(); b++) {
-        if (b_type[b] == B_STONE_WALL && b_hp[b] > 0.0f && b_cell[b] == cell) {
+        if (b_type[b] == B_STONE_WALL && b_hp[b] > 0.0f && b_built[b] && b_cell[b] == cell) {
             wall = int(b);
             break;
         }
@@ -1275,10 +1276,36 @@ void SimWorld::logic_pass(float p_dt) {
                 const float dx = bx - pos_x[i];
                 const float dy = by - pos_y[i];
                 const float reach = st.attack_range + UNIT_RADIUS + half;
-                if (dx * dx + dy * dy <= reach * reach) { // 贴近：修理
+                if (dx * dx + dy * dy <= reach * reach) { // 贴近：施工/修理
                     slot_x[i] = pos_x[i];
                     slot_y[i] = pos_y[i];
-                    b_hp[b] = std::min(building_max_hp(b_type[b]), b_hp[b] + 12.0f * p_dt);
+                    const float bmax = building_max_hp(b_type[b]);
+                    // 工地按建筑施工时长出活；已建成的修理固定 12HP/s
+                    const float rate = b_built[b] ? 12.0f : bmax / building_build_time(b_type[b]);
+                    b_hp[b] = std::min(bmax, b_hp[b] + rate * p_dt);
+                    if (b_hp[b] >= bmax && !b_built[b]) { // 完工
+                        b_built[b] = 1;
+                        if (is_gate(b_type[b])) { // 门完工默认开（己方通行）
+                            b_state[b] = 1;
+                            for (auto it = field_cache.begin(); it != field_cache.end();) {
+                                it = ((it->first >> 32) == 0) ? field_cache.erase(it) : ++it;
+                            }
+                        }
+                        construction_events.push_back(int32_t(b));
+                        // 自动接续：8 格内还有工地就继续盖（确定性扫描：取索引最小者）
+                        const int ux = cell_of_pos(pos_x[i], pos_y[i]) % grid_dim;
+                        const int uy = cell_of_pos(pos_x[i], pos_y[i]) / grid_dim;
+                        for (size_t nb = 0; nb < b_cell.size(); nb++) {
+                            if (b_built[nb] || b_hp[nb] <= 0.0f) {
+                                continue;
+                            }
+                            const int nx = b_cell[nb] % grid_dim, ny = b_cell[nb] / grid_dim;
+                            if (std::max(std::abs(nx - ux), std::abs(ny - uy)) <= 8) {
+                                target_cell[i] = -2 - int32_t(nb);
+                                break;
+                            }
+                        }
+                    }
                     break;
                 }
                 slot_x[i] = bx; // 走过去（同攻城寻路：远走流场近直线）
@@ -1337,7 +1364,7 @@ void SimWorld::logic_pass(float p_dt) {
 
     // 农田定时产粮（5 食物 / 10 秒；正式工人分配系统前的切片实现）
     for (size_t b = 0; b < b_cell.size(); b++) {
-        if (b_type[b] != B_FARM || b_hp[b] <= 0.0f) {
+        if (b_type[b] != B_FARM || b_hp[b] <= 0.0f || !b_built[b]) {
             continue;
         }
         b_timer[b] -= p_dt;
@@ -1349,7 +1376,7 @@ void SimWorld::logic_pass(float p_dt) {
 
     // 箭塔自动攻击（玩家建筑，打 faction != 0）
     for (size_t b = 0; b < b_cell.size(); b++) {
-        if (b_type[b] != B_TOWER || b_hp[b] <= 0.0f) {
+        if (b_type[b] != B_TOWER || b_hp[b] <= 0.0f || !b_built[b]) {
             continue;
         }
         b_timer[b] -= p_dt;
@@ -1703,6 +1730,16 @@ PackedInt32Array SimWorld::take_death_events() {
     return out;
 }
 
+PackedInt32Array SimWorld::take_construction_events() {
+    PackedInt32Array out = construction_events;
+    construction_events.clear();
+    return out;
+}
+
+bool SimWorld::is_building_built(int p_index) const {
+    return p_index >= 0 && p_index < int(b_built.size()) && b_built[p_index];
+}
+
 int SimWorld::count_alive(int p_faction) const {
     int n = 0;
     for (int i = 0; i < unit_count; i++) {
@@ -1790,7 +1827,7 @@ int32_t SimWorld::nearest_dropoff(int p_res_type, int32_t p_from_cell) const {
     int32_t best = -1;
     int best_d = INT32_MAX;
     for (size_t b = 0; b < b_cell.size(); b++) {
-        if (b_hp[b] <= 0.0f || !building_accepts(b_type[b], p_res_type)) {
+        if (b_hp[b] <= 0.0f || !b_built[b] || !building_accepts(b_type[b], p_res_type)) {
             continue;
         }
         const int bx = b_cell[b] % grid_dim, by = b_cell[b] / grid_dim;
@@ -1856,7 +1893,34 @@ bool SimWorld::can_place_building(int p_type, Vector2 p_world_pos) const {
     return stockpile[RES_WOOD] >= cost.x && stockpile[RES_STONE] >= cost.y;
 }
 
-bool SimWorld::place_building(int p_type, Vector2 p_world_pos) {
+// 施工秒数（单工人；多工人施工速度叠加）
+float SimWorld::building_build_time(int p_type) {
+    switch (p_type) {
+        case B_PALISADE:
+            return 4.0f;
+        case B_GATE:
+            return 6.0f;
+        case B_STONE_WALL:
+            return 8.0f;
+        case B_STONE_GATE:
+            return 10.0f;
+        case B_HOUSE:
+            return 10.0f;
+        case B_LUMBER:
+        case B_QUARRY:
+        case B_FARM:
+            return 12.0f;
+        case B_STOREHOUSE:
+            return 15.0f;
+        case B_TOWER:
+        case B_SWORKSHOP:
+            return 25.0f;
+        default: // 兵营/射箭场/马厩/营地
+            return 20.0f;
+    }
+}
+
+bool SimWorld::place_building(int p_type, Vector2 p_world_pos, bool p_instant) {
     if (!can_place_building(p_type, p_world_pos)) {
         return false;
     }
@@ -1865,10 +1929,13 @@ bool SimWorld::place_building(int p_type, Vector2 p_world_pos) {
     stockpile[RES_STONE] -= cost.y;
     b_type.push_back(uint8_t(p_type));
     b_cell.push_back(cell_of_pos(p_world_pos.x, p_world_pos.y));
-    b_hp.push_back(building_max_hp(uint8_t(p_type)));
+    // 工地从 10% 血开始，工人施工（修理通路）补满即完工
+    b_hp.push_back(building_max_hp(uint8_t(p_type)) * (p_instant ? 1.0f : 0.1f));
     b_timer.push_back(0.0f);
-    b_state.push_back(is_gate(uint8_t(p_type)) ? 1 : 0); // 新门默认开（己方先能通行）
+    // 门完工才可开（工地门恒堵）；其余建筑 state 0
+    b_state.push_back((p_instant && is_gate(uint8_t(p_type))) ? 1 : 0);
     b_garrison.push_back(-1);
+    b_built.push_back(p_instant ? 1 : 0);
     mark_occupancy(int(b_cell.size()) - 1, 1);
     field_cache.clear(); // 占地变化，全部流场失效（tick 间调用，无悬空指针）
 
@@ -2002,7 +2069,7 @@ PackedInt32Array SimWorld::get_buildings() const {
 // 存档格式（版本见 SAVE_VERSION）：头部 + 单位 SoA + 建筑数组，定宽小端。
 // 数据布局变更必须升版本号；golden 基线随逻辑变更重置（删 golden_hash.txt 重新初始化）。
 static constexpr uint32_t SAVE_MAGIC = 0x57564943; // "CIVW" LE
-static constexpr uint32_t SAVE_VERSION = 8; // v8: + 建筑 b_state（门开关/摧毁语义靠 hp）
+static constexpr uint32_t SAVE_VERSION = 9; // v9: + b_built（工地/完工）
 
 template <typename T>
 static void blob_write(PackedByteArray &r_out, const T *p_data, size_t p_count) {
@@ -2064,6 +2131,7 @@ PackedByteArray SimWorld::save_state() const {
     blob_write(out, b_hp.data(), b_hp.size());
     blob_write(out, b_timer.data(), b_timer.size());
     blob_write(out, b_state.data(), b_state.size());
+    blob_write(out, b_built.data(), b_built.size());
     return out;
 }
 
@@ -2139,11 +2207,13 @@ bool SimWorld::load_state(const PackedByteArray &p_data) {
     b_hp.resize(n_buildings);
     b_timer.resize(n_buildings);
     b_state.resize(n_buildings);
+    b_built.resize(n_buildings);
     if (!blob_read(p_data, at, b_type.data(), b_type.size()) ||
             !blob_read(p_data, at, b_cell.data(), b_cell.size()) ||
             !blob_read(p_data, at, b_hp.data(), b_hp.size()) ||
             !blob_read(p_data, at, b_timer.data(), b_timer.size()) ||
-            !blob_read(p_data, at, b_state.data(), b_state.size())) {
+            !blob_read(p_data, at, b_state.data(), b_state.size()) ||
+            !blob_read(p_data, at, b_built.data(), b_built.size())) {
         return false;
     }
     // 语义校验：枚举/格号越界即拒载（长度已前置校验，这里挡字节级损坏；
@@ -2202,6 +2272,7 @@ int64_t SimWorld::state_hash() const {
     mix_bytes(morale.data(), morale.size() * 4);
     mix_bytes(formation.data(), formation.size());
     mix_bytes(b_hp.data(), b_hp.size() * 4);
+    mix_bytes(b_built.data(), b_built.size());
     mix_bytes(b_type.data(), b_type.size());
     mix_bytes(b_cell.data(), b_cell.size() * 4);
     mix_bytes(b_state.data(), b_state.size());
@@ -2222,6 +2293,9 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("count_alive", "faction"), &SimWorld::count_alive);
     ClassDB::bind_method(D_METHOD("take_attack_events"), &SimWorld::take_attack_events);
     ClassDB::bind_method(D_METHOD("take_death_events"), &SimWorld::take_death_events);
+    ClassDB::bind_method(D_METHOD("take_construction_events"), &SimWorld::take_construction_events);
+    ClassDB::bind_method(D_METHOD("is_building_built", "index"), &SimWorld::is_building_built);
+    ClassDB::bind_static_method("SimWorld", D_METHOD("building_build_time", "type"), &SimWorld::building_build_time);
     ClassDB::bind_method(D_METHOD("command_attack", "ids", "target_id"), &SimWorld::command_attack);
     ClassDB::bind_method(D_METHOD("get_unit_at", "world_pos", "radius", "faction"), &SimWorld::get_unit_at);
     ClassDB::bind_method(D_METHOD("count_state", "state", "faction"), &SimWorld::count_state);
@@ -2253,7 +2327,7 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_unit_carry", "id"), &SimWorld::get_unit_carry);
     ClassDB::bind_method(D_METHOD("get_stockpile", "type"), &SimWorld::get_stockpile);
     ClassDB::bind_method(D_METHOD("can_place_building", "type", "world_pos"), &SimWorld::can_place_building);
-    ClassDB::bind_method(D_METHOD("place_building", "type", "world_pos"), &SimWorld::place_building);
+    ClassDB::bind_method(D_METHOD("place_building", "type", "world_pos", "instant"), &SimWorld::place_building, DEFVAL(false));
     ClassDB::bind_method(D_METHOD("get_buildings"), &SimWorld::get_buildings);
     ClassDB::bind_static_method("SimWorld", D_METHOD("building_cost", "type"), &SimWorld::building_cost);
     ClassDB::bind_method(D_METHOD("tick", "dt"), &SimWorld::tick);

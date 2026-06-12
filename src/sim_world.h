@@ -128,6 +128,7 @@ class SimWorld : public godot::RefCounted {
     godot::PackedInt32Array attack_events;
     godot::PackedInt32Array building_events; // 本帧被摧毁的建筑 index（瞬态）
     godot::PackedInt32Array death_events; // 本帧阵亡 [type, faction, x, y, ...]（死亡反馈）
+    godot::PackedInt32Array construction_events; // 本帧完工建筑 index（瞬态）
 
     // 建筑（序列化范围）：占地 footprint×footprint，锚点为左上格
     std::vector<uint8_t> b_type;
@@ -144,6 +145,7 @@ class SimWorld : public godot::RefCounted {
     std::vector<float> prev_x, prev_y; // 渲染插值
     std::vector<int32_t> occupied; // 建筑占地：0 = 空，否则建筑 index+1（由 b_* 重建）
     std::vector<int32_t> b_garrison; // 各建筑驻军单位 id，-1 = 空（由单位状态重建）
+    std::vector<uint8_t> b_built; // 0 = 工地（无功能，工人施工至满血完工）
     std::vector<const FlowField *> unit_field; // 本 tick 各单位用的流场
     godot::Ref<GameMap> map;
     // 流场按 (目的格, 阵营) 缓存：城门通行性按阵营区分（开门只放行己方）
@@ -205,7 +207,11 @@ public:
     int get_unit_at(godot::Vector2 p_world_pos, float p_radius, int p_faction) const; // faction -1 = 任意
 
     bool can_place_building(int p_type, godot::Vector2 p_world_pos) const;
-    bool place_building(int p_type, godot::Vector2 p_world_pos);
+    // p_instant：跳过施工直接完工（初始营地/测试用）；默认放置为工地
+    bool place_building(int p_type, godot::Vector2 p_world_pos, bool p_instant = false);
+    bool is_building_built(int p_index) const;
+    godot::PackedInt32Array take_construction_events(); // 本帧完工的建筑 index
+    static float building_build_time(int p_type); // 施工秒数（单工人）
     godot::PackedInt32Array get_buildings() const; // 扁平 [type, cell, ...]（含已摧毁，hp<=0）
     float get_building_hp(int p_index) const;
     int get_building_state(int p_index) const;
