@@ -33,6 +33,7 @@ const BUILDINGS := [
 	{ "name": "石墙", "color": Color("8a8a96") },
 	{ "name": "石门", "color": Color("aaa9b8") },
 	{ "name": "锯木厂", "color": Color("b08850") },
+	{ "name": "市场", "color": Color("c4a23a") },
 ]
 const WALL_TYPES := [10, 13] # 可拖动划线连放的 1×1 墙体
 # 训练表：单位类型 → 所需建筑/成本（与 src/sim_world.h 对应）
@@ -81,6 +82,12 @@ var train_timers := {} # 建筑 index → 当前项剩余秒
 var queue_accum := 0.0
 var hunger_notice_cd := 0.0
 const TRAIN_TIME := 4.0 # 秒/单位：训练不再瞬时出兵
+# 市场汇率（本地贸易：把过剩木材换成瓶颈资源；比采集贵，应急用）
+const TRADES := [
+	{ "give": 0, "ga": 10, "get": 1, "qa": 3, "label": "10木→3石" },
+	{ "give": 0, "ga": 10, "get": 2, "qa": 5, "label": "10木→5食" },
+	{ "give": 3, "ga": 5, "get": 1, "qa": 4, "label": "5板→4石" },
+]
 var raid_ai_timer := 0.0
 var ghost := ColorRect.new()
 var shot_timer := 0.0
@@ -639,6 +646,17 @@ func _smart_command(ids: PackedInt32Array, pos: Vector2) -> void:
 		pass
 	else:
 		sim.command_gather(ids, pos)
+
+
+func _trade(offer: Dictionary) -> void:
+	# 需要选中一座存活的市场
+	if selected_building < 0 or sim.get_building_hp(selected_building) <= 0.0 \
+			or sim.get_buildings()[selected_building * 2] != 16:
+		return
+	if sim.trade(offer["give"], offer["ga"], offer["get"], offer["qa"]):
+		hud.notice("成交：%s" % offer["label"], 1.5)
+	else:
+		hud.notice("%s不足" % GameHud.RES_NAMES[offer["give"]], 1.5)
 
 
 func _building_at(pos: Vector2) -> int:

@@ -68,6 +68,21 @@ func _ready() -> void:
 	bar.add_child(hbox)
 	add_child(bar)
 
+	# 市场交易栏（选中市场时显示）
+	trade_bar = PanelContainer.new()
+	trade_bar.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	trade_bar.position = Vector2(-180, -110)
+	var tbox := HBoxContainer.new()
+	for offer in main.TRADES:
+		var tb := Button.new()
+		tb.text = offer["label"]
+		tb.add_theme_font_size_override("font_size", 14)
+		tb.pressed.connect(main._trade.bind(offer))
+		tbox.add_child(tb)
+	trade_bar.add_child(tbox)
+	trade_bar.visible = false
+	add_child(trade_bar)
+
 	_build_minimap()
 
 
@@ -98,6 +113,9 @@ func update(delta: float) -> void:
 			pop, sim.get_stockpile(3), pop, pop_cap(),
 		]
 		info_label.text = _status_line()
+		trade_bar.visible = main.selected_building >= 0 \
+				and main.sim.get_building_hp(main.selected_building) > 0.0 \
+				and main.sim.get_buildings()[main.selected_building * 2] == 16
 	minimap.queue_redraw()
 
 
@@ -216,6 +234,7 @@ func _draw_minimap() -> void:
 	minimap.draw_rect(r, Color(1, 1, 1, 0.8), false, 1.0)
 
 
+var trade_bar: PanelContainer # 选中市场时显示
 var game_over_panel: CenterContainer
 
 

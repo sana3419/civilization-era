@@ -32,6 +32,7 @@ func _init() -> void:
 	_bench_resume_in_battle()
 	_bench_satiety()
 	_bench_sawmill()
+	_bench_trade()
 	_bench_golden()
 
 	print("=== done, failures: %d ===" % failures)
@@ -888,6 +889,20 @@ func _bench_sawmill() -> void:
 		_check(ok_conv, "sawmill convert"),
 		w.get_stockpile(0), w.get_stockpile(3),
 		_check(w.get_stockpile(0) < 5 and w.get_stockpile(3) == 42, "sawmill idle on empty"),
+	])
+
+
+# 市场兑换：足额成交、不足拒绝（汇率游戏层定，sim 只做原子交换）
+func _bench_trade() -> void:
+	var mw := _new_world()
+	var w: SimWorld = mw[1]
+	w.debug_add_resources(20, 0, 0)
+	var ok1: bool = w.trade(0, 10, 1, 3) # 10木→3石
+	var ok2: bool = w.trade(0, 15, 1, 5) # 只剩 10 木：拒绝
+	print("trade: 兑换后 木%d 石%d %s | 不足拒绝 %s" % [
+		w.get_stockpile(0), w.get_stockpile(1),
+		_check(ok1 and w.get_stockpile(0) == 10 and w.get_stockpile(1) == 3, "trade ok"),
+		_check(not ok2 and w.get_stockpile(0) == 10, "trade reject"),
 	])
 
 

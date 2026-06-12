@@ -657,6 +657,17 @@ bool SimWorld::try_spend(int p_wood, int p_stone, int p_food, int p_plank) {
     return true;
 }
 
+bool SimWorld::trade(int p_give_type, int p_give_amount, int p_get_type, int p_get_amount) {
+    if (p_give_type < 0 || p_give_type >= RES_COUNT || p_get_type < 0 ||
+            p_get_type >= RES_COUNT || p_give_amount <= 0 || p_get_amount <= 0 ||
+            stockpile[p_give_type] < p_give_amount) {
+        return false;
+    }
+    stockpile[p_give_type] -= p_give_amount;
+    stockpile[p_get_type] += p_get_amount;
+    return true;
+}
+
 int32_t SimWorld::find_nearest_enemy(int p_unit, float p_range) const {
     // 用上一 tick 的空间网格（确定性：与本 tick 写入无关）
     const float px = pos_x[p_unit], py = pos_y[p_unit];
@@ -1788,6 +1799,8 @@ Vector2i SimWorld::building_cost(int p_type) { // (木材, 石料)
             return Vector2i(40, 20);
         case B_SAWMILL:
             return Vector2i(30, 10);
+        case B_MARKET:
+            return Vector2i(25, 5);
         case B_STONE_WALL:
             return Vector2i(0, 10);
         case B_STONE_GATE:
@@ -2179,6 +2192,7 @@ void SimWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("spawn_workers", "count", "world_pos"), &SimWorld::spawn_workers);
     ClassDB::bind_method(D_METHOD("spawn_units", "type", "count", "world_pos", "faction"), &SimWorld::spawn_units);
     ClassDB::bind_method(D_METHOD("try_spend", "wood", "stone", "food", "plank"), &SimWorld::try_spend, DEFVAL(0));
+    ClassDB::bind_method(D_METHOD("trade", "give_type", "give_amount", "get_type", "get_amount"), &SimWorld::trade);
     ClassDB::bind_method(D_METHOD("get_unit_type", "id"), &SimWorld::get_unit_type);
     ClassDB::bind_method(D_METHOD("get_unit_hp", "id"), &SimWorld::get_unit_hp);
     ClassDB::bind_method(D_METHOD("is_unit_alive", "id"), &SimWorld::is_unit_alive);

@@ -81,7 +81,8 @@ enum BuildingType : uint8_t {
     B_STONE_WALL = 13, // 石墙：1×1，可驻军 1 单位（墙上状态）
     B_STONE_GATE = 14, // 石门：1×1 可开关，同木门规则
     B_SAWMILL = 15, // 锯木厂：自动 5 木材 → 3 木板 / 4s（暂无工人指派）
-    B_COUNT = 16,
+    B_MARKET = 16, // 市场：本地贸易（兑换汇率在游戏层）
+    B_COUNT = 17,
 };
 
 // 模拟世界：SoA、确定性、串行状态机 + 并行移动/分离。
@@ -191,6 +192,8 @@ public:
     int spawn_workers(int p_count, godot::Vector2 p_world_pos);
     int spawn_units(int p_type, int p_count, godot::Vector2 p_world_pos, int p_faction);
     bool try_spend(int p_wood, int p_stone, int p_food, int p_plank = 0); // 资源足够则扣除
+    // 库存兑换（市场用）：give 足够则按量交换，汇率由调用方定
+    bool trade(int p_give_type, int p_give_amount, int p_get_type, int p_get_amount);
     void debug_add_resources(int p_wood, int p_stone, int p_food, int p_plank = 0); // 测试/作弊
     void command_move(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
     void command_gather(const godot::PackedInt32Array &p_ids, godot::Vector2 p_world_pos);
