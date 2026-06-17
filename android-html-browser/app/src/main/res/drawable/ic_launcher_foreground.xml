@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 浏览器窗口主体 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,38 h48 a4,4 0 0 1 4,4 v28 a4,4 0 0 1 -4,4 h-48 a4,4 0 0 1 -4,-4 v-28 a4,4 0 0 1 4,-4 z" />
+    <!-- 标签栏条 -->
+    <path
+        android:fillColor="#3D5AFE"
+        android:pathData="M26,46 h56 v3 h-56 z" />
+</vector>

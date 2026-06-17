@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">本地HTML浏览器</string>
+    <string name="new_tab">+</string>
+    <string name="back">‹ 后退</string>
+    <string name="forward">前进 ›</string>
+    <string name="file_list">文件列表</string>
+    <string name="close_tab">×</string>
+    <string name="empty_hint">未找到 .html 文件。\n请把网页放到：\n%1$s</string>
+    <string name="no_permission">需要存储权限才能扫描本地 HTML 文件</string>
+    <string name="grant_permission">去授权</string>
+    <string name="permission_title">需要文件访问权限</string>
+    <string name="permission_message">本应用需要“所有文件访问权限”来读取本地 HTML 文件夹。请在接下来的系统设置页中开启。</string>
+</resources>

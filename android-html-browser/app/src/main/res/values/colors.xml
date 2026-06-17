@@ -1,0 +1,8 @@
+<resources>
+    <color name="bar_bg">#FF2B2B2B</color>
+    <color name="content_bg">#FFFFFFFF</color>
+    <color name="tab_active">#FF3D5AFE</color>
+    <color name="tab_inactive">#FF4A4A4A</color>
+    <color name="tab_text">#FFFFFFFF</color>
+    <color name="button_text">#FFFFFFFF</color>
+</resources>

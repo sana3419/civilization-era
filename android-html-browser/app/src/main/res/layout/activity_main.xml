@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 极简界面：顶部标签栏 + 内容区(WebView/文件列表) + 底部导航栏 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <!-- ===== 顶部标签栏 ===== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:background="@color/bar_bg"
+        android:orientation="horizontal">
+
+        <!-- 标签可横向滚动 -->
+        <HorizontalScrollView
+            android:id="@+id/tabScroll"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:scrollbars="none">
+
+            <!-- 标签 chip 由代码动态添加到这里 -->
+            <LinearLayout
+                android:id="@+id/tabContainer"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="4dp"
+                android:paddingEnd="4dp" />
+        </HorizontalScrollView>
+
+        <!-- “+” 新建标签（回到文件列表） -->
+        <Button
+            android:id="@+id/btnNewTab"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="48dp"
+            android:layout_height="match_parent"
+            android:text="@string/new_tab"
+            android:textColor="@color/button_text"
+            android:textSize="22sp" />
+    </LinearLayout>
+
+    <!-- ===== 内容区 ===== -->
+    <FrameLayout
+        android:id="@+id/contentContainer"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="@color/content_bg">
+
+        <!-- WebView 实例由代码动态添加到本容器 -->
+
+        <!-- 文件列表（覆盖在内容区之上，按需显隐） -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/fileList"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/content_bg" />
+
+        <!-- 空状态提示 -->
+        <TextView
+            android:id="@+id/emptyHint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:padding="24dp"
+            android:textSize="15sp"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <!-- ===== 底部导航栏 ===== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:background="@color/bar_bg"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnBack"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:text="@string/back"
+            android:textColor="@color/button_text" />
+
+        <Button
+            android:id="@+id/btnForward"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:text="@string/forward"
+            android:textColor="@color/button_text" />
+
+        <Button
+            android:id="@+id/btnFileList"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:text="@string/file_list"
+            android:textColor="@color/button_text" />
+    </LinearLayout>
+</LinearLayout>

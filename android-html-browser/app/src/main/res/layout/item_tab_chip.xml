@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 单个标签 chip：标题(点击切换) + ×(点击关闭) -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="wrap_content"
+    android:layout_height="36dp"
+    android:layout_marginEnd="4dp"
+    android:background="@drawable/tab_chip_bg"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="10dp"
+    android:paddingEnd="6dp">
+
+    <TextView
+        android:id="@+id/tabTitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxWidth="140dp"
+        android:maxLines="1"
+        android:textColor="@color/tab_text"
+        android:textSize="13sp"
+        tools:ignore="HardcodedText" />
+
+    <TextView
+        android:id="@+id/tabClose"
+        android:layout_width="28dp"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:text="@string/close_tab"
+        android:textColor="@color/tab_text"
+        android:textSize="18sp" />
+</LinearLayout>

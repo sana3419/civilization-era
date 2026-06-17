@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      存储权限取舍：
+      - 目标是读取任意文件夹（默认 /storage/emulated/0/MyHtml/）下的 .html 文件。
+      - READ_MEDIA_IMAGES/VIDEO/AUDIO 只覆盖“媒体”文件，HTML 不算媒体，扫不到，故不适用。
+      - 因此在 Android 11+ (API 30+) 采用 MANAGE_EXTERNAL_STORAGE（所有文件访问），
+        需在系统设置里手动授予；代码会引导跳转。
+      - Android 10 及以下 (API 24-29) 用传统 READ_EXTERNAL_STORAGE 运行时权限即可。
+    -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <!--
+      故意不声明 android.permission.INTERNET：
+      从系统层面彻底杜绝联网访问外部网址，只能加载本地 file://。
+    -->
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.HtmlTabBrowser"
+        tools:targetApi="31">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
