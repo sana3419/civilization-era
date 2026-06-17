@@ -1,0 +1,11 @@
+<resources>
+    <!-- Typora Night 深色风格 -->
+    <color name="bg">#FF363B40</color>
+    <color name="surface">#FF2E3338</color>
+    <color name="surface_alt">#FF3A4047</color>
+    <color name="divider">#FF41464B</color>
+    <color name="text_primary">#FFB8BFC6</color>
+    <color name="text_secondary">#FF7E848B</color>
+    <color name="accent">#FF6A9FE0</color>
+    <color name="icon">#FFB8BFC6</color>
+</resources>

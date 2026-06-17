@@ -1,6 +1,13 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- 极简主题：无 ActionBar -->
+    <!-- 极简主题：无 ActionBar，边到边，状态/导航栏透明（由代码处理 insets） -->
     <style name="Theme.HtmlTabBrowser" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="android:statusBarColor">@color/bar_bg</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="colorPrimary">@color/accent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- 设置页 PreferenceFragmentCompat 需要这个 -->
+        <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
     </style>
 </resources>

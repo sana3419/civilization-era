@@ -1,8 +1,11 @@
 <resources>
-    <color name="bar_bg">#FF2B2B2B</color>
-    <color name="content_bg">#FFFFFFFF</color>
-    <color name="tab_active">#FF3D5AFE</color>
-    <color name="tab_inactive">#FF4A4A4A</color>
-    <color name="tab_text">#FFFFFFFF</color>
-    <color name="button_text">#FFFFFFFF</color>
+    <!-- Typora 浅色风格：大留白、低饱和、细分隔线 -->
+    <color name="bg">#FFFFFFFF</color>            <!-- 内容背景 -->
+    <color name="surface">#FFFAFAFA</color>       <!-- 顶/底栏、列表 -->
+    <color name="surface_alt">#FFF2F3F5</color>   <!-- 选中标签底色 -->
+    <color name="divider">#FFECECEC</color>       <!-- 1px 分隔线 -->
+    <color name="text_primary">#FF3F3F3F</color>
+    <color name="text_secondary">#FF9AA0A6</color>
+    <color name="accent">#FF4078C0</color>        <!-- Typora 链接蓝 -->
+    <color name="icon">#FF5F6368</color>
 </resources>

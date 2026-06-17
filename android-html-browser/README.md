@@ -1,84 +1,74 @@
 # 本地 HTML 多标签浏览器（HtmlTabBrowser）
 
-极简的 Android（Kotlin）应用：扫描手机上某个固定文件夹下的所有 `.html` 文件，
-用带标签页的 WebView 打开它们。**只加载本地 `file://`，不联网、无地址栏。**
+极简、Typora 风格的 Android（Kotlin）应用：用 SAF 选一个文件夹，浏览其中（含子文件夹）的
+`.html` 文件，用带标签页的 WebView 打开。**只服务本地内容，不联网、无地址栏。**
 
 ## 功能
 
-- 启动后自动扫描固定文件夹（默认 `/storage/emulated/0/MyHtml/`），把 `.html`/`.htm`
-  文件名列成可点击的列表。
-- 多标签：可同时打开多个文件，顶部标签栏可**切换 / 关闭单个标签**，点 **「+」** 回到
-  文件列表新建标签。
-- WebView 已开启 `JavaScript`、`DOM Storage`、`allowFileAccess`、
-  `allowFileAccessFromFileURLs`、`allowUniversalAccessFromFileURLs`，
-  本地页面的 JS / CSS / 图片 / `fetch` 本地文件均可正常工作。
-- 底部「‹ 后退 / 前进 ›」**仅作用于当前标签**的 WebView 历史。
-- **去掉的功能**：地址栏、搜索框、书签、历史记录、下载管理、设置页、分享、外部联网。
+- **SAF 目录浏览**：首次选择一个文件夹（系统选择器），之后可在其中**进出子文件夹**分类查阅，
+  列表区分文件夹与 `.html` 文件，文件显示修改时间/大小。
+- **多标签**：同时打开多个文件，顶部标签栏可**切换 / 关闭单个标签**，「+」回到文件列表新建标签。
+- **本地资源全可用**：JS / DOM Storage / 相对引用的 css/js/图片 / 同源 `fetch` 都正常工作
+  （实现见下「为什么能用 SAF 还保留相对路径」）。
+- 底部「后退/前进」**仅作用于当前标签**的 WebView 历史。
+- **设置页**：主题（跟随系统/浅色/深色）、网页字体缩放、关闭标签前确认、阅读时常亮屏幕、
+  清除缓存与 DOM 数据、关于。
+- **Typora 风视觉**：大留白、细分隔线、扁平标签（选中底部 2dp 强调线）、浅/深双主题。
+- **去掉的功能**：地址栏、搜索框、书签、历史记录、下载管理、分享、外部联网。
+
+## 存储方案：SAF（无需任何权限）
+
+要读取任意文件夹里的 HTML，本项目用 **Storage Access Framework**：用户用系统选择器挑一个目录，
+应用通过 `takePersistableUriPermission` 拿到**可持久化的读权限**。因此：
+
+- **不声明 `MANAGE_EXTERNAL_STORAGE`、不声明 `READ_*`**，更合规、对 Android 13/14/15 友好；
+- **不声明 `INTERNET`**，从系统层面杜绝联网（另在 WebView 里再拦截 `http/https/ftp/ws` 双保险）。
+
+> 取舍：相比「所有文件访问权限」，SAF 需要用户主动选一次文件夹，但换来零敏感权限。
+
+### 为什么用 SAF 还能让相对路径 / fetch 正常工作
+
+SAF 拿到的是 `content://` 文档 Uri，直接 `loadUrl` 会让 `<img src="x.png">` 这类**相对引用失效**。
+解决办法：把选中的目录树**当成一个虚拟同源站点**——WebView 加载
+`https://localhtml.invalid/<相对路径>`，在 `shouldInterceptRequest` 里按相对路径在目录树中
+`findFile` 并返回对应文件的字节流（见 `LocalTreeServer.kt` 与 `MainActivity.serve()`）。
+这样相对路径、同源 `fetch`、`localStorage` 全部照常工作，且是 https 安全上下文。
 
 ## 关键实现位置
 
 | 关注点 | 文件 |
 | --- | --- |
-| 扫描文件夹的常量路径 | `app/src/main/java/.../MainActivity.kt` 顶部 `HTML_DIR` |
-| 标签管理（增/切/关、销毁 WebView） | `MainActivity.kt` 的 `openInNewTab / selectTab / closeTab` |
-| WebView 安全开关与外链拦截 | `MainActivity.kt` 的 `createWebView()` |
-| 存储权限处理 | `MainActivity.kt` 的 `ensureStoragePermission()` |
-| 文件列表 | `HtmlFileAdapter.kt` |
-
-## 存储权限取舍（重要）
-
-要读取**任意文件夹**里的 `.html` 文件，有两条路：
-
-- **`READ_MEDIA_IMAGES/VIDEO/AUDIO`**（Android 13+）：只能访问“媒体”文件。
-  HTML 不是媒体类型，**扫不到**，不适用本场景。
-- **`MANAGE_EXTERNAL_STORAGE`（所有文件访问）**：能读取整个外置存储下的任意文件。
-  **本项目采用此方案。** 代价是需要用户在系统设置里手动开启（不能弹窗一键授权），
-  且上架 Google Play 需额外声明用途。对“本地 HTML 阅读器”这种自用工具完全够用。
-
-实现细节：
-- Manifest 声明 `MANAGE_EXTERNAL_STORAGE`；Android 11+ 用
-  `Environment.isExternalStorageManager()` 检查，未授权则跳转
-  `Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION` 引导用户开启，
-  返回应用后自动重新扫描。
-- Android 10 及以下（API 24–29）退回传统 `READ_EXTERNAL_STORAGE` 运行时权限。
-- **故意不声明 `INTERNET` 权限**，从系统层面杜绝联网，双保险（另在 WebView 里拦截
-  `http/https/ftp/ws` 请求）。
+| 标签管理（增/切/关、destroy WebView） | `MainActivity.kt` 的 `openInNewTab/selectTab/closeTab` |
+| 文件夹导航（进出子目录、面包屑） | `MainActivity.kt` 的 `pathDirs/refreshListing/goUpFolder` |
+| 虚拟同源资源服务 | `LocalTreeServer.kt` + `MainActivity.serve()` |
+| 状态栏遮挡修复（edge-to-edge insets） | `MainActivity.setupInsets()` |
+| 设置项与持久化 | `SettingsFragment.kt` / `Prefs.kt` / `res/xml/preferences.xml` |
+| 主题色（浅/深） | `res/values/colors.xml`、`res/values-night/colors.xml` |
 
 ## 兼容性
 
-- `minSdk 24`（Android 7.0），`targetSdk / compileSdk 35`（Android 15，当前最新稳定版）。
-- 标签用**多个 WebView 实例**管理：切换只改 `visibility`，**不重新加载、不丢状态**；
-  关闭标签时 `removeView` + `destroy()`，`onDestroy` 销毁全部，避免内存泄漏。
+- `minSdk 24`（Android 7.0），`targetSdk / compileSdk 35`（Android 15）。
+- 标签用**多个 WebView 实例**：切换只改 `visibility`，**不重载、不丢状态**；
+  关闭标签 `removeView` + `destroy()`，`onDestroy` 销毁全部，避免内存泄漏。
+- targetSdk 35 在 Android 15 强制 edge-to-edge，已用 `WindowInsets` 给顶/底栏加 padding，
+  修复「标签栏与状态栏重叠、顶部点不到」的问题。
 
 ## 如何打包成 APK（debug）
 
-### 方式一：Android Studio（最省事）
-1. `File → Open` 选择本目录 `android-html-browser/`。
-2. 等待 Gradle 同步（会自动补齐 Gradle Wrapper）。
-3. `Build → Build Bundle(s) / APK(s) → Build APK(s)`。
-4. 产物在 `app/build/outputs/apk/debug/app-debug.apk`。
+### Android Studio
+`Open` 选 `android-html-browser/` → 等 Gradle 同步 → `Build → Build APK(s)`，
+产物在 `app/build/outputs/apk/debug/app-debug.apk`。
 
-### 方式二：命令行
-需本机已装 JDK 17 与 Android SDK，并设置 `ANDROID_HOME`（或在 `local.properties`
-写 `sdk.dir=/path/to/Android/sdk`）。
-
+### 命令行（需 JDK 17、Android SDK，`ANDROID_HOME` 或 `local.properties` 指向 SDK）
 ```sh
 cd android-html-browser
-# 若没有 gradlew（本仓库未提交 wrapper 二进制），先用本机 gradle 生成一次：
-gradle wrapper --gradle-version 8.9
-# 然后打 debug 包：
+gradle wrapper --gradle-version 8.9   # 本仓库未提交 wrapper 二进制，首次生成一次
 ./gradlew assembleDebug
-# 安装到已连接的设备：
-./gradlew installDebug
+./gradlew installDebug                 # 安装到已连接设备
 ```
-
-APK 路径：`app/build/outputs/apk/debug/app-debug.apk`。
 
 ## 使用
 
-1. 在手机上新建文件夹 `/storage/emulated/0/MyHtml/`（即“内部存储/MyHtml”），
-   把你的 `.html` 及其依赖的 css/js/图片放进去。
-2. 安装并打开 App，按提示授予“所有文件访问权限”。
-3. 文件列表里点文件 → 在新标签打开；点「+」可再开别的文件。
-
-> 想换扫描目录：改 `MainActivity.kt` 顶部的 `HTML_DIR` 常量即可。
+1. 安装并打开 App，点「选择文件夹」，在系统选择器里挑一个存放 HTML 的目录并允许访问。
+2. 列表里点文件夹进入分类、点 `.html` 在新标签打开；「+」可再开别的文件。
+3. 右下角齿轮进入设置，可换主题、调字号、改文件夹等。

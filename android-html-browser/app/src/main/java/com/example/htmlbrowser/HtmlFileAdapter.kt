@@ -1,40 +1,59 @@
 package com.example.htmlbrowser
 
+import android.text.format.DateUtils
+import android.text.format.Formatter
 import android.view.LayoutInflater
+import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
-import java.io.File
+import androidx.documentfile.provider.DocumentFile
 
 /**
- * 文件列表适配器：展示扫描到的 .html 文件名，点击回调打开新标签。
+ * 文件浏览适配器：同时展示子文件夹与 .html 文件。
+ * 点击文件夹 → 进入；点击文件 → 打开新标签（由 Activity 决定）。
  */
 class HtmlFileAdapter(
-    private val onClick: (File) -> Unit
+    private val onClick: (DocumentFile) -> Unit
 ) : RecyclerView.Adapter<HtmlFileAdapter.VH>() {
 
-    private val files = mutableListOf<File>()
+    private val items = mutableListOf<DocumentFile>()
 
-    /** 刷新数据 */
-    fun submit(newFiles: List<File>) {
-        files.clear()
-        files.addAll(newFiles)
+    fun submit(newItems: List<DocumentFile>) {
+        items.clear()
+        items.addAll(newItems)
         notifyDataSetChanged()
     }
 
-    class VH(val text: TextView) : RecyclerView.ViewHolder(text)
+    class VH(view: View) : RecyclerView.ViewHolder(view) {
+        val icon: ImageView = view.findViewById(R.id.fileIcon)
+        val name: TextView = view.findViewById(R.id.fileName)
+        val meta: TextView = view.findViewById(R.id.fileMeta)
+    }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val v = LayoutInflater.from(parent.context)
-            .inflate(R.layout.item_html_file, parent, false) as TextView
+            .inflate(R.layout.item_html_file, parent, false)
         return VH(v)
     }
 
     override fun onBindViewHolder(holder: VH, position: Int) {
-        val file = files[position]
-        holder.text.text = file.name
-        holder.text.setOnClickListener { onClick(file) }
+        val doc = items[position]
+        val ctx = holder.itemView.context
+        holder.name.text = doc.name ?: "?"
+
+        if (doc.isDirectory) {
+            holder.icon.setImageResource(R.drawable.ic_folder)
+            holder.meta.text = ctx.getString(R.string.folder_label)
+        } else {
+            holder.icon.setImageResource(R.drawable.ic_file)
+            val size = Formatter.formatShortFileSize(ctx, doc.length())
+            val time = DateUtils.getRelativeTimeSpanString(doc.lastModified())
+            holder.meta.text = "$time · $size"
+        }
+        holder.itemView.setOnClickListener { onClick(doc) }
     }
 
-    override fun getItemCount() = files.size
+    override fun getItemCount() = items.size
 }

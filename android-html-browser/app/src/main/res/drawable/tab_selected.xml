@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 选中标签：极淡底色 + 底部 2dp 强调线（Typora 风扁平选中态） -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <color android:color="@color/surface_alt" />
+    </item>
+    <item android:gravity="bottom">
+        <shape android:shape="rectangle">
+            <size android:height="2dp" />
+            <solid android:color="@color/accent" />
+        </shape>
+    </item>
+</layer-list>
